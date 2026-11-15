@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '4.0'
+$AppVersion = '4.1'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -270,7 +270,7 @@ $xaml = @'
           </Border>
           <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="Mesh Downloader" Foreground="#F2F2F5" FontWeight="Bold" FontSize="15"/>
-            <TextBlock x:Name="VersionText" Text="v4.0" Foreground="#6F6F78" FontSize="11"/>
+            <TextBlock x:Name="VersionText" Text="v4.1" Foreground="#6F6F78" FontSize="11"/>
           </StackPanel>
         </StackPanel>
         <Border Grid.Column="1" CornerRadius="8" Background="#141418" BorderBrush="#2A2A31"
@@ -1014,7 +1014,10 @@ function Set-WindowIcon {
     try {
         $ico = Join-Path $PSScriptRoot 'MeshDownloader.ico'
         if (Test-Path -LiteralPath $ico) {
-            $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create((New-Object System.Uri($ico)))
+            # Read it into memory first - opening it by path keeps the file locked,
+            # which stopped the updater from replacing it.
+            $ms = New-Object System.IO.MemoryStream(,[IO.File]::ReadAllBytes($ico))
+            $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create($ms, [System.Windows.Media.Imaging.BitmapCreateOptions]::None, [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
         }
     } catch { }
 }
@@ -1053,7 +1056,18 @@ function Check-Updates([switch]$Manual) {
             $names += $name
         }
         if ($names.Count -eq 0) { throw 'version.json lists no files' }
-        foreach ($name in $names) { Copy-Item -LiteralPath (Join-Path $tmp $name) -Destination (Join-Path $PSScriptRoot $name) -Force }
+        $busy = @()
+        foreach ($name in $names) {
+            $from = Join-Path $tmp $name
+            $to = Join-Path $PSScriptRoot $name
+            if (Test-Path -LiteralPath $to) {
+                $a = [IO.File]::ReadAllBytes($from); $b = [IO.File]::ReadAllBytes($to)
+                if ($a.Length -eq $b.Length -and [Convert]::ToBase64String($a) -eq [Convert]::ToBase64String($b)) { continue }
+            }
+            try { Copy-Item -LiteralPath $from -Destination $to -Force }
+            catch { $busy += $name }
+        }
+        if ($busy.Count -gt 0) { Log ("Skipped {0} (in use) - it'll update next time." -f ($busy -join ', ')) }
         Install-Plugin
         Save-Settings
         Log "Updated to v$remote. Restarting..."

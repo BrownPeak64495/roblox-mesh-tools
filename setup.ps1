@@ -59,7 +59,7 @@ Write-Host "  Installing v$($info.version) to $dest"
 # Copy the app files
 $full = { param($p) [IO.Path]::GetFullPath($p).TrimEnd('\') }
 if ((& $full $src) -ne (& $full $dest)) {
-    foreach ($f in @($info.files)) {
+    foreach ($f in (@($info.files) + @($info.installOnly))) {
         $name = [IO.Path]::GetFileName([string]$f)
         $from = Join-Path $src $name
         if (-not $name -or -not (Test-Path -LiteralPath $from)) { continue }
