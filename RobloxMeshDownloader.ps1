@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '3.3'
+$AppVersion = '3.4'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -270,7 +270,7 @@ $xaml = @'
           </Border>
           <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="Mesh Downloader" Foreground="#F2F2F5" FontWeight="Bold" FontSize="15"/>
-            <TextBlock x:Name="VersionText" Text="v3.3" Foreground="#6F6F78" FontSize="11"/>
+            <TextBlock x:Name="VersionText" Text="v3.4" Foreground="#6F6F78" FontSize="11"/>
           </StackPanel>
         </StackPanel>
         <Border Grid.Column="1" CornerRadius="8" Background="#141418" BorderBrush="#2A2A31"
@@ -985,24 +985,24 @@ function Install-Plugin {
 # them they stay deleted until the folder moves).
 function Install-Shortcuts {
     try {
-        $vbs = Join-Path $PSScriptRoot 'Mesh Downloader.vbs'
-        if (-not (Test-Path -LiteralPath $vbs)) { return }
-        if ($script:shortcutFor -eq $vbs) { return }
+        $app = $PSCommandPath
+        if ($script:shortcutFor -eq $app) { return }
         $ico = Join-Path $PSScriptRoot 'MeshDownloader.ico'
         $shell = New-Object -ComObject WScript.Shell
         $made = 0
         foreach ($dir in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
             if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
             $lnk = $shell.CreateShortcut((Join-Path $dir 'Mesh Downloader.lnk'))
-            $lnk.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
-            $lnk.Arguments = '"' + $vbs + '"'
+            $lnk.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $lnk.Arguments = '-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "' + $app + '"'
             $lnk.WorkingDirectory = $PSScriptRoot
+            $lnk.WindowStyle = 7   # start minimized so no console flashes up
             if (Test-Path -LiteralPath $ico) { $lnk.IconLocation = "$ico,0" }
             $lnk.Description = 'Mesh Downloader - Roblox mesh tools'
             $lnk.Save()
             $made++
         }
-        $script:shortcutFor = $vbs
+        $script:shortcutFor = $app
         Save-Settings
         if ($made -gt 0) { Log 'Added a Mesh Downloader icon to your Desktop and Start menu.' }
     } catch {

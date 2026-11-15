@@ -1,9 +1,9 @@
-ROBLOX MESH TOOLS v3.3
+ROBLOX MESH TOOLS v3.4
 ======================
 
 What's in here
-  Mesh Downloader.vbs         Opens the app (no console window)
-  Start Mesh Downloader.bat   Same thing - handy for the very first run
+  Setup.bat / setup.ps1       Installs the app to a folder you choose
+  Start Mesh Downloader.bat   Opens the app without the Desktop icon
   MeshDownloader.ico          The app's icon
   RobloxMeshDownloader.ps1    The Mesh Downloader app
   MeshCollector.lua           The Studio plugin (the app installs it for you)
@@ -12,19 +12,16 @@ What's in here
 --------------------------------------------------
 SETUP (once)
 --------------------------------------------------
-1. Unzip this folder somewhere you'll keep it (e.g. Documents\RobloxMeshTools).
-   Replace your old copy of these files.
-2. Double-click "Start Mesh Downloader.bat" (only this first time).
-   (SmartScreen? More info -> Run anyway.)
-   - The app puts a "Mesh Downloader" icon on your Desktop and in the
-     Start menu. Use that from now on. (Right-click it > Pin to taskbar
-     if you like.)
-   - The app copies the plugin into Studio's Plugins folder by itself.
-   - It also moves any "[local]" models that the old version saved into the
-     Plugins folder over to Roblox Meshes\Local Models.
-3. Paste your Open Cloud API key (Get Key opens the page). It saves itself.
-4. Restart Studio. Plugins tab -> "Mesh Collector" and "Mesh Inserter".
-5. First time the plugin talks to the app, Studio may ask about HTTP access
+1. Download the zip from the GitHub page, right-click it > Extract All.
+2. Double-click Setup.bat (SmartScreen? More info -> Run anyway).
+3. Pick where to install - any drive, external drives are fine.
+   Setup copies the app there and opens it. The app then:
+   - adds a "Mesh Downloader" icon to your Desktop and Start menu
+     (right-click it > Pin to taskbar if you like),
+   - installs the Studio plugin into Studio's Plugins folder.
+4. Paste your Open Cloud API key (Get Key opens the page). It saves itself.
+5. Restart Studio. Plugins tab -> "Mesh Collector" and "Mesh Inserter".
+6. First time the plugin talks to the app, Studio may ask about HTTP access
    to localhost - click ALLOW (localhost = your own PC).
 
 If you still have MeshIdCollector.lua (v1) in the Plugins folder, delete it.

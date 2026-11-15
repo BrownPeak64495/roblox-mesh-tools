@@ -1,11 +1,12 @@
 {
-  "version": "3.3",
+  "version": "3.4",
   "files": [
     "RobloxMeshDownloader.ps1",
     "MeshCollector.lua",
     "README.txt",
     "Start Mesh Downloader.bat",
-    "Mesh Downloader.vbs",
+    "Setup.bat",
+    "setup.ps1",
     "MeshDownloader.ico",
     "version.json"
   ]
