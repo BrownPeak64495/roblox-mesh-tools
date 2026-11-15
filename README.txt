@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v3.5
+ROBLOX MESH TOOLS v3.6
 ======================
 
 What's in here
@@ -48,8 +48,11 @@ Settings (click "Settings" to fold them away):
   Add mesh ID:    off = Magazine.mesh instead of Magazine_123456.mesh
                   (two different meshes with the same name become "Name (2)")
   Folder per model
-  Model pivot:    Keep | Middle (center of the bounding box) | Average
-                  (average position of all parts)
+  Model pivot:    Keep | Middle | Average
+                  Middle = center of the box around the whole model
+                  (halfway between its farthest edges).
+                  Average = average position of all its parts, so it
+                  leans toward where most parts are.
   Center each part's pivot on itself
   (Pivot settings are used by Build local copy, Save model, Insert, and the
    "Apply pivots" button - which works on ANY selected model or part.)
@@ -72,9 +75,13 @@ Shows everything you've downloaded or saved:
   MESHES - every downloaded .mesh
 Search box filters both. Refresh reloads the list.
 
-Preview: the item spins on its own. Hover to stop it, drag to look around,
-scroll to zoom. Name and details (verts, tris, bones, size, file size,
-date) show underneath.
+Every row has its own little spinning preview (Collector and Inserter):
+  hover it  -> it gets bigger (move away -> it shrinks)
+  click it  -> it stays big (click again to shrink)
+  drag      -> rotate it,  scroll -> zoom
+The light follows your view, so every side is lit when you look at it.
+Click a row's NAME to select it (Collector: selects it in Studio;
+Inserter: shows its details below the list).
 
 Insert:
   a mesh   -> a MeshPart that loads your local .mesh

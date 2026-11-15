@@ -31,7 +31,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "3.5" -- keep in sync with version.json
+local PLUGIN_VERSION = "3.6" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -924,6 +924,335 @@ local function makeWidget(id, title, w, h, dock)
 end
 
 -- =================================================================
+-- Mini 3D previews (shared by both windows)
+-- Hover = bigger, click = keep big, drag = rotate, scroll = zoom.
+-- Lighting follows the camera, so whatever side you look at is lit.
+-- =================================================================
+local thumbLists = {} -- list ScrollingFrame -> { widget, thumbs }
+local loadingThumbs = 0
+local MAX_LOADING = 2
+local SMALL_THUMB = 48
+local BIG_THUMB = 200
+
+local function registerThumbList(list, widget)
+	thumbLists[list] = { widget = widget, thumbs = {} }
+end
+
+local function resetThumbs(list)
+	local e = thumbLists[list]
+	if e then
+		e.thumbs = {}
+	end
+end
+
+local function stripScripts(inst)
+	for _, d in ipairs(inst:GetDescendants()) do
+		if d:IsA("LuaSourceContainer") then
+			pcall(function()
+				d:Destroy()
+			end)
+		end
+	end
+end
+
+local function thumbCamera(t)
+	local fov = math.rad(t.cam.FieldOfView)
+	local dist = (t.radius / math.sin(fov / 2)) * t.zoom
+	local rot = CFrame.Angles(0, t.yaw, 0) * CFrame.Angles(-t.pitch, 0, 0)
+	local pos = rot * Vector3.new(0, 0, dist)
+	t.cam.CFrame = CFrame.lookAt(pos, Vector3.zero)
+	t.vp.LightDirection = t.cam.CFrame.LookVector -- "headlight": the side you see is always lit
+end
+
+local function thumbSetContent(t, instances)
+	t.world:ClearAllChildren()
+	if not instances or #instances == 0 then
+		t.state = "empty"
+		t.note.Text = "no preview"
+		t.note.Visible = true
+		return
+	end
+	local holder = Instance.new("Model")
+	for _, inst in ipairs(instances) do
+		stripScripts(inst)
+		inst.Parent = holder
+	end
+	holder.Parent = t.world
+	local ok, cf, size = pcall(function()
+		return holder:GetBoundingBox()
+	end)
+	if ok and size and size.Magnitude > 0 then
+		holder:TranslateBy(-cf.Position)
+		t.radius = math.max(size.Magnitude / 2, 0.1)
+	else
+		t.radius = 2
+	end
+	t.state = "ready"
+	t.note.Visible = false
+	thumbCamera(t)
+end
+
+local function makeThumb(list, loader, onResize)
+	local vp = new("ViewportFrame", {
+		BackgroundColor3 = Color3.fromRGB(24, 24, 29),
+		Ambient = Color3.fromRGB(175, 175, 182),
+		LightColor = Color3.fromRGB(120, 120, 120),
+		Active = true,
+		ZIndex = 2,
+	}, { corner(6) })
+	local pinStroke = new("UIStroke", { Thickness = 2, Color = ACCENT, Enabled = false })
+	pinStroke.Parent = vp
+	local cam = Instance.new("Camera")
+	cam.FieldOfView = 35
+	cam.Parent = vp
+	vp.CurrentCamera = cam
+	local world = Instance.new("WorldModel")
+	world.Parent = vp
+	local note = new("TextLabel", {
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		Font = Enum.Font.Gotham,
+		TextSize = 10,
+		TextWrapped = true,
+		TextColor3 = Color3.fromRGB(120, 120, 130),
+		Text = "...",
+		ZIndex = 3,
+	})
+	note.Parent = vp
+
+	local t = {
+		vp = vp, cam = cam, world = world, note = note, loader = loader, onResize = onResize,
+		state = "idle", radius = 1, yaw = math.random() * math.pi * 2, pitch = 0.35, zoom = 1,
+		hovering = false, dragging = false, big = false, pinned = false, hoverToken = 0, moved = 0, last = nil,
+	}
+	local function setBig(b)
+		if t.big == b then
+			return
+		end
+		t.big = b
+		if not b then
+			t.zoom = 1
+		end
+		if t.onResize then
+			t.onResize()
+		end
+		if t.state == "ready" then
+			thumbCamera(t)
+		end
+	end
+	t.setBig = setBig
+
+	vp.MouseEnter:Connect(function()
+		t.hovering = true
+		t.hoverToken = t.hoverToken + 1
+		local tok = t.hoverToken
+		task.delay(0.35, function()
+			if t.hovering and tok == t.hoverToken then
+				setBig(true)
+			end
+		end)
+	end)
+	vp.MouseLeave:Connect(function()
+		t.hovering = false
+		t.dragging = false
+		t.hoverToken = t.hoverToken + 1
+		if not t.pinned then
+			setBig(false)
+		end
+	end)
+	vp.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			t.dragging = true
+			t.last = input.Position
+			t.moved = 0
+		end
+	end)
+	vp.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			local wasDrag = t.moved > 4
+			t.dragging = false
+			if not wasDrag then
+				t.pinned = not t.pinned
+				pinStroke.Enabled = t.pinned
+				setBig(t.pinned or t.hovering)
+			end
+		end
+	end)
+	vp.InputChanged:Connect(function(input)
+		if t.state ~= "ready" then
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.MouseMovement and t.dragging and t.last then
+			local d = input.Position - t.last
+			t.last = input.Position
+			t.moved = t.moved + math.abs(d.X) + math.abs(d.Y)
+			t.yaw = t.yaw - d.X * 0.012
+			t.pitch = math.clamp(t.pitch + d.Y * 0.012, -1.45, 1.45)
+			thumbCamera(t)
+		elseif input.UserInputType == Enum.UserInputType.MouseWheel and t.big then
+			t.zoom = math.clamp(t.zoom * (1 - input.Position.Z * 0.12), 0.15, 6)
+			thumbCamera(t)
+		end
+	end)
+
+	table.insert(thumbLists[list].thumbs, t)
+	return t
+end
+
+-- Loads previews only for rows you can see, and spins them.
+RunService.Heartbeat:Connect(function(dt)
+	for list, entry in pairs(thumbLists) do
+		if entry.widget.Enabled then
+			local top = list.AbsolutePosition.Y
+			local bottom = top + list.AbsoluteSize.Y
+			for _, t in ipairs(entry.thumbs) do
+				local vp = t.vp
+				if vp.Parent then
+					local y = vp.AbsolutePosition.Y
+					if y + vp.AbsoluteSize.Y > top and y < bottom then
+						if t.state == "idle" and loadingThumbs < MAX_LOADING then
+							t.state = "loading"
+							loadingThumbs = loadingThumbs + 1
+							task.spawn(function()
+								local ok = pcall(t.loader, function(instances)
+									if vp.Parent then
+										thumbSetContent(t, instances)
+									end
+								end)
+								if not ok and t.state == "loading" then
+									t.state = "empty"
+									t.note.Text = "no preview"
+								end
+								loadingThumbs = loadingThumbs - 1
+							end)
+						elseif t.state == "ready" and not t.hovering and not t.dragging then
+							t.yaw = t.yaw + dt * 0.8
+							thumbCamera(t)
+						end
+					end
+				end
+			end
+		end
+	end
+end)
+
+local function paintRow(row, isSel)
+	if isSel then
+		row.BackgroundColor3 = ACCENT
+		row.BackgroundTransparency = 0.55
+	else
+		row.BackgroundTransparency = 1
+	end
+end
+
+-- A list row with a mini preview on the left, a title and up to 2 lines of info.
+-- o = { title, lines, selected, onClick, loader, indent, arrow, onArrow }
+local function thumbRow(list, order, o)
+	local indent = o.indent or 0
+	local row = new("TextButton", {
+		AutoButtonColor = false,
+		Text = "",
+		BorderSizePixel = 0,
+		LayoutOrder = order,
+		ClipsDescendants = true,
+		Size = UDim2.new(1, 0, 0, 58),
+	})
+	paintRow(row, o.selected)
+	local x0 = 6 + indent
+	if o.arrow then
+		local a = new("TextButton", {
+			Position = UDim2.fromOffset(x0, 0),
+			Size = UDim2.new(0, 16, 0, 58),
+			BackgroundTransparency = 1,
+			Text = o.arrow,
+			Font = Enum.Font.GothamBold,
+			TextSize = 12,
+			TextColor3 = themeColor(C.DimmedText),
+		})
+		a.Parent = row
+		a.MouseButton1Click:Connect(o.onArrow)
+		x0 = x0 + 18
+	end
+	local title = new("TextLabel", {
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextColor3 = themeColor(C.MainText),
+		Text = o.title or "",
+	})
+	title.Parent = row
+	local labels = {}
+	for i, line in ipairs(o.lines or {}) do
+		local l = new("TextLabel", {
+			BackgroundTransparency = 1,
+			Font = Enum.Font.Code,
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			TextColor3 = themeColor(C.DimmedText),
+			Text = line,
+		})
+		l.Parent = row
+		labels[i] = l
+	end
+	local t
+	local function layout()
+		local textX, textY
+		if t.big then
+			t.vp.Position = UDim2.fromOffset(x0, 6)
+			t.vp.Size = UDim2.new(1, -(x0 + 8), 0, BIG_THUMB)
+			textX, textY = x0, BIG_THUMB + 12
+			row.Size = UDim2.new(1, 0, 0, textY + 18 + #labels * 14 + 6)
+		else
+			t.vp.Position = UDim2.fromOffset(x0, 5)
+			t.vp.Size = UDim2.fromOffset(SMALL_THUMB, SMALL_THUMB)
+			textX, textY = x0 + SMALL_THUMB + 8, 6
+			row.Size = UDim2.new(1, 0, 0, 58)
+		end
+		title.Position = UDim2.fromOffset(textX, textY)
+		title.Size = UDim2.new(1, -(textX + 8), 0, 18)
+		for i, l in ipairs(labels) do
+			l.Position = UDim2.fromOffset(textX, textY + 18 + (i - 1) * 14)
+			l.Size = UDim2.new(1, -(textX + 8), 0, 14)
+		end
+	end
+	t = makeThumb(list, o.loader, layout)
+	t.vp.Parent = row
+	layout()
+	row.MouseButton1Click:Connect(o.onClick)
+	row.Parent = list
+	return row, t
+end
+
+local function groupHeader(list, order, text, onClick)
+	local row = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, 26),
+		AutoButtonColor = true,
+		Text = "",
+		BorderSizePixel = 0,
+		LayoutOrder = order,
+		BackgroundColor3 = themeColor(C.MainBackground),
+		BackgroundTransparency = 0.3,
+	})
+	new("TextLabel", {
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(8, 0),
+		Size = UDim2.new(1, -16, 1, 0),
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		TextColor3 = themeColor(C.MainText),
+		Text = text,
+	}).Parent = row
+	row.MouseButton1Click:Connect(onClick)
+	row.Parent = list
+	return row
+end
+
+-- =================================================================
 -- MESH COLLECTOR
 -- =================================================================
 local colWidget, colRoot = makeWidget("MeshCollectorV2", "Mesh Collector", 360, 640)
@@ -1040,6 +1369,7 @@ pcall(function()
 	new("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }).Parent = listFrame
 end)
 listFrame.Parent = colRoot
+registerThumbList(listFrame, colWidget)
 
 local sendButton = button("Send to Downloader", true, 8)
 sendButton.Parent = colRoot
@@ -1108,6 +1438,9 @@ end)
 -- Collecting
 local frozenSelection = {}
 local currentEntries = {}
+local suppressLiveUntil = 0 -- ignore the selection change we cause by clicking a row
+local colSelected = nil
+local colRows = {} -- part -> row
 
 local function collect(selected)
 	local entries, seen, models = {}, {}, {}
@@ -1128,7 +1461,7 @@ local function collect(selected)
 			models[m] = true
 			modelCount = modelCount + 1
 		end
-		table.insert(entries, { id = id, name = meshBaseName(owner), folder = folderFor(owner) })
+		table.insert(entries, { id = id, name = meshBaseName(owner), folder = folderFor(owner), owner = owner, model = m })
 	end
 	for _, obj in ipairs(selected) do
 		if obj and obj.Parent then
@@ -1148,37 +1481,24 @@ local function fileNameOf(e)
 	return e.name .. ".mesh"
 end
 
-local function makeRow(parent, i, title, sub)
-	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 40), BorderSizePixel = 0, LayoutOrder = i })
-	if i % 2 == 0 then
-		row.BackgroundColor3 = themeColor(C.MainBackground)
-		row.BackgroundTransparency = 0.5
-	else
-		row.BackgroundTransparency = 1
+local function partSizeText(inst)
+	if inst:IsA("BasePart") then
+		local s = inst.Size
+		return string.format("%.2f x %.2f x %.2f", s.X, s.Y, s.Z)
 	end
-	new("TextLabel", {
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(10, 4),
-		Size = UDim2.new(1, -20, 0, 18),
-		Font = Enum.Font.GothamMedium,
-		TextSize = 13,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		TextColor3 = themeColor(C.MainText),
-		Text = title,
-	}).Parent = row
-	new("TextLabel", {
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(10, 22),
-		Size = UDim2.new(1, -20, 0, 14),
-		Font = Enum.Font.Code,
-		TextSize = 11,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		TextColor3 = themeColor(C.DimmedText),
-		Text = sub,
-	}).Parent = row
-	row.Parent = parent
+	return "?"
+end
+
+local function selectInStudio(inst)
+	if not inst or not inst.Parent then
+		return
+	end
+	suppressLiveUntil = os.clock() + 0.5
+	Selection:Set({ inst })
+	colSelected = inst
+	for owner, row in pairs(colRows) do
+		paintRow(row, owner == inst)
+	end
 end
 
 local function makeNote(parent, text, order)
@@ -1214,6 +1534,8 @@ refresh = function()
 		selected = frozenSelection
 	end
 	clearRows(listFrame)
+	resetThumbs(listFrame)
+	colRows = {}
 	local entries, modelCount = collect(selected)
 	currentEntries = entries
 	listHeader.Text = string.format("Meshes (%d)", #entries)
@@ -1231,16 +1553,64 @@ refresh = function()
 		makeNote(listFrame, "No meshes in this selection", 1)
 		return
 	end
-	for i, e in ipairs(entries) do
-		if i > MAX_ROWS then
-			makeNote(listFrame, string.format("...and %d more (all will be sent)", #entries - MAX_ROWS), i)
+
+	-- group the meshes under the model they belong to
+	local groups, groupOrder = {}, {}
+	for _, e in ipairs(entries) do
+		local key = e.model or "none"
+		if not groups[key] then
+			groups[key] = { model = e.model, list = {} }
+			table.insert(groupOrder, key)
+		end
+		table.insert(groups[key].list, e)
+	end
+
+	local order, shown = 0, 0
+	for _, key in ipairs(groupOrder) do
+		local g = groups[key]
+		order = order + 1
+		local n = #g.list
+		local headerText
+		if g.model then
+			headerText = string.format("%s  (%d mesh%s)  - click to select", g.model.Name, n, n == 1 and "" or "es")
+		else
+			headerText = string.format("Not in a model  (%d)", n)
+		end
+		groupHeader(listFrame, order, headerText, function()
+			if g.model then
+				selectInStudio(g.model)
+			end
+		end)
+		for _, e in ipairs(g.list) do
+			shown = shown + 1
+			order = order + 1
+			if shown > MAX_ROWS then
+				makeNote(listFrame, string.format("...and %d more (all will be sent)", #entries - MAX_ROWS), order)
+				break
+			end
+			local lines = {
+				e.id .. "  -  " .. partSizeText(e.owner) .. "  -  " .. e.owner.ClassName,
+				e.folder and ("saves to " .. e.folder .. "/") or e.owner:GetFullName(),
+			}
+			local row = thumbRow(listFrame, order, {
+				title = fileNameOf(e),
+				lines = lines,
+				selected = (colSelected == e.owner),
+				onClick = function()
+					selectInStudio(e.owner)
+				end,
+				loader = function(cb)
+					local ok, c = pcall(function()
+						return e.owner:Clone()
+					end)
+					cb((ok and c) and { c } or nil)
+				end,
+			})
+			colRows[e.owner] = row
+		end
+		if shown > MAX_ROWS then
 			break
 		end
-		local sub = e.id
-		if e.folder then
-			sub = sub .. "   ->  " .. e.folder .. "/"
-		end
-		makeRow(listFrame, i, fileNameOf(e), sub)
 	end
 end
 
@@ -1557,6 +1927,9 @@ collectButton.MouseButton1Click:Connect(function()
 end)
 
 Selection.SelectionChanged:Connect(function()
+	if os.clock() < suppressLiveUntil then
+		return
+	end
 	if state.live and colWidget.Enabled then
 		queueRefresh()
 	end
@@ -1584,13 +1957,15 @@ refreshLibButton.LayoutOrder = 2
 refreshLibButton.Parent = searchRow
 searchRow.Parent = insRoot
 
+dimLabel("Hover a preview to enlarge it, click it to keep it big, drag to rotate, scroll to zoom.", 3, 11).Parent = insRoot
+
 local insList = new("ScrollingFrame", {
-	Size = UDim2.new(1, 0, 0, 160),
+	Size = UDim2.new(1, 0, 0, 200),
 	CanvasSize = UDim2.new(0, 0, 0, 0),
 	AutomaticCanvasSize = Enum.AutomaticSize.Y,
 	ScrollBarThickness = 6,
 	BorderSizePixel = 0,
-	LayoutOrder = 3,
+	LayoutOrder = 4,
 }, { corner(8), vlist(0) })
 theme(insList, "BackgroundColor3", C.InputFieldBackground)
 stroke().Parent = insList
@@ -1598,51 +1973,10 @@ pcall(function()
 	new("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }).Parent = insList
 end)
 insList.Parent = insRoot
-
--- 3D preview
-local viewport = new("ViewportFrame", {
-	Size = UDim2.new(1, 0, 0, 220),
-	BackgroundColor3 = Color3.fromRGB(22, 22, 26),
-	Ambient = Color3.fromRGB(165, 165, 175),
-	LightColor = Color3.fromRGB(255, 255, 255),
-	LightDirection = Vector3.new(-1, -1.4, -0.8),
-	Active = true,
-	LayoutOrder = 4,
-}, { corner(8) })
-stroke().Parent = viewport
-viewport.Parent = insRoot
-local previewCamera = Instance.new("Camera")
-previewCamera.FieldOfView = 40
-previewCamera.Parent = viewport
-viewport.CurrentCamera = previewCamera
-local world = Instance.new("WorldModel")
-world.Parent = viewport
-local previewHint = new("TextLabel", {
-	BackgroundTransparency = 1,
-	Size = UDim2.fromScale(1, 1),
-	Font = Enum.Font.GothamMedium,
-	TextSize = 12,
-	TextColor3 = Color3.fromRGB(140, 140, 150),
-	TextWrapped = true,
-	Text = "Pick a mesh or model to preview it",
-})
-previewHint.Parent = viewport
-local controlsHint = new("TextLabel", {
-	BackgroundTransparency = 1,
-	AnchorPoint = Vector2.new(0, 1),
-	Position = UDim2.new(0, 8, 1, -6),
-	Size = UDim2.new(1, -16, 0, 14),
-	Font = Enum.Font.Gotham,
-	TextSize = 10,
-	TextXAlignment = Enum.TextXAlignment.Left,
-	TextColor3 = Color3.fromRGB(120, 120, 130),
-	Text = "Hover to stop  -  drag to look around  -  scroll to zoom",
-	Visible = false,
-})
-controlsHint.Parent = viewport
+registerThumbList(insList, insWidget)
 
 local infoLabel = label({
-	Text = "",
+	Text = "Pick a mesh or model to see its details.",
 	RichText = true,
 	TextSize = 12,
 	TextWrapped = true,
@@ -1663,101 +1997,15 @@ local function setInsStatus(text, color)
 	insStatus.TextColor3 = color or themeColor(C.DimmedText)
 end
 
--- Preview camera ------------------------------------------------------
-local preview = { model = nil, radius = 2, yaw = 0.6, pitch = 0.35, zoom = 1, hovering = false, dragging = false, last = nil }
-
-local function updateCamera()
-	local fov = math.rad(previewCamera.FieldOfView)
-	local dist = (preview.radius / math.sin(fov / 2)) * preview.zoom
-	local rot = CFrame.Angles(0, preview.yaw, 0) * CFrame.Angles(-preview.pitch, 0, 0)
-	local pos = rot * Vector3.new(0, 0, dist)
-	previewCamera.CFrame = CFrame.lookAt(pos, Vector3.zero)
-end
-
-local function setPreview(instances)
-	world:ClearAllChildren()
-	preview.model = nil
-	if not instances or #instances == 0 then
-		previewHint.Visible = true
-		controlsHint.Visible = false
-		return
-	end
-	local holder = Instance.new("Model")
-	holder.Name = "Preview"
-	for _, inst in ipairs(instances) do
-		for _, d in ipairs(inst:GetDescendants()) do
-			if d:IsA("LuaSourceContainer") then
-				d:Destroy()
-			end
-		end
-		inst.Parent = holder
-	end
-	holder.Parent = world
-	local ok, cf, size = pcall(function()
-		return holder:GetBoundingBox()
-	end)
-	if ok and size and size.Magnitude > 0 then
-		holder:TranslateBy(-cf.Position)
-		preview.radius = math.max(size.Magnitude / 2, 0.25)
-	else
-		preview.radius = 2
-	end
-	preview.model = holder
-	preview.yaw, preview.pitch, preview.zoom = 0.6, 0.35, 1
-	previewHint.Visible = false
-	controlsHint.Visible = true
-	updateCamera()
-end
-
-viewport.MouseEnter:Connect(function()
-	preview.hovering = true
-end)
-viewport.MouseLeave:Connect(function()
-	preview.hovering = false
-	preview.dragging = false
-end)
-viewport.InputBegan:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		preview.dragging = true
-		preview.last = input.Position
-	end
-end)
-viewport.InputEnded:Connect(function(input)
-	if input.UserInputType == Enum.UserInputType.MouseButton1 then
-		preview.dragging = false
-	end
-end)
-viewport.InputChanged:Connect(function(input)
-	if not preview.model then
-		return
-	end
-	if input.UserInputType == Enum.UserInputType.MouseMovement and preview.dragging and preview.last then
-		local delta = input.Position - preview.last
-		preview.last = input.Position
-		preview.yaw = preview.yaw - delta.X * 0.012
-		preview.pitch = math.clamp(preview.pitch + delta.Y * 0.012, -1.45, 1.45)
-		updateCamera()
-	elseif input.UserInputType == Enum.UserInputType.MouseWheel then
-		preview.zoom = math.clamp(preview.zoom * (1 - input.Position.Z * 0.12), 0.15, 6)
-		updateCamera()
-	end
-end)
-
-RunService.Heartbeat:Connect(function(dt)
-	if insWidget.Enabled and preview.model and not preview.hovering and not preview.dragging then
-		preview.yaw = preview.yaw + dt * 0.6
-		updateCamera()
-	end
-end)
-
 -- Library data ----------------------------------------------------------
 local lib = { meshes = {}, models = {}, loaded = false }
 local sectionOpen = { models = true, meshes = true }
 local expanded = {}
-local modelCache = {} -- key -> { loading, err, roots, parts, partCount, date }
+local modelCache = {} -- key -> { loading, waiters, err, roots, parts, partCount, date }
 local meshTemplates = {} -- id -> MeshPart
 local selected = nil
 local selectToken = 0
+local insRows = {} -- item/part table -> row
 local renderInserter -- forward
 
 local function fmtBytes(n)
@@ -1828,14 +2076,16 @@ end
 
 local function loadModel(m, callback)
 	local cached = modelCache[m.key]
-	if cached and cached.date == m.date and not cached.loading then
-		callback(cached)
+	if cached and cached.date == m.date then
+		if cached.loading then
+			table.insert(cached.waiters, callback)
+		else
+			callback(cached)
+		end
 		return
 	end
-	if cached and cached.loading then
-		return
-	end
-	modelCache[m.key] = { loading = true, date = m.date }
+	local pending = { loading = true, date = m.date, waiters = { callback } }
+	modelCache[m.key] = pending
 	task.spawn(function()
 		local entry = { date = m.date }
 		if string.lower(m.ext or "") == ".rbxmx" then
@@ -1876,8 +2126,37 @@ local function loadModel(m, callback)
 			end
 		end
 		modelCache[m.key] = entry
-		callback(entry)
+		for _, w in ipairs(pending.waiters) do
+			task.spawn(w, entry)
+		end
 	end)
+end
+
+-- Same as loadModel but waits for the result (for previews)
+local function waitModel(m)
+	local result, done = nil, false
+	loadModel(m, function(entry)
+		result = entry
+		done = true
+	end)
+	local t0 = os.clock()
+	while not done and os.clock() - t0 < 120 do
+		task.wait(0.05)
+	end
+	return result
+end
+
+local function cloneAll(list)
+	local out = {}
+	for _, r in ipairs(list) do
+		local ok, c = pcall(function()
+			return r:Clone()
+		end)
+		if ok and c then
+			table.insert(out, c)
+		end
+	end
+	return out
 end
 
 local function showMeshInfo(m)
@@ -1931,52 +2210,30 @@ local function showPartInfo(m, p)
 	)
 end
 
+local function updateInsHighlights()
+	local key = selected and (selected.kind == "part" and selected.part or selected.item) or nil
+	for k, row in pairs(insRows) do
+		paintRow(row, k == key)
+	end
+end
+
 local function selectMesh(m)
 	selectToken = selectToken + 1
-	local token = selectToken
 	selected = { kind = "mesh", item = m }
 	showMeshInfo(m)
-	renderInserter()
-	task.spawn(function()
-		local tpl, err = getMeshTemplate(m.id)
-		if token ~= selectToken then
-			return
-		end
-		if tpl then
-			setPreview({ tpl:Clone() })
-		else
-			setPreview(nil)
-			setInsStatus("Couldn't load this mesh: " .. tostring(err), RED)
-		end
-	end)
+	updateInsHighlights()
 end
 
 local function selectModel(m)
 	selectToken = selectToken + 1
 	local token = selectToken
 	selected = { kind = "model", item = m }
-	showModelInfo(m, nil)
-	setPreview(nil)
-	renderInserter()
+	showModelInfo(m, modelCache[m.key])
+	updateInsHighlights()
 	loadModel(m, function(entry)
-		if token ~= selectToken then
-			renderInserter()
-			return
+		if token == selectToken then
+			showModelInfo(m, entry)
 		end
-		showModelInfo(m, entry)
-		if entry.roots then
-			local clones = {}
-			for _, r in ipairs(entry.roots) do
-				local ok, c = pcall(function()
-					return r:Clone()
-				end)
-				if ok and c then
-					table.insert(clones, c)
-				end
-			end
-			setPreview(clones)
-		end
-		renderInserter()
 	end)
 end
 
@@ -1984,97 +2241,14 @@ local function selectPart(m, p)
 	selectToken = selectToken + 1
 	selected = { kind = "part", item = m, part = p }
 	showPartInfo(m, p)
-	local ok, c = pcall(function()
-		return p.inst:Clone()
-	end)
-	setPreview(ok and c and { c } or nil)
-	renderInserter()
-end
-
--- List rows -------------------------------------------------------------
-local function insRow(order, indent, title, sub, isSelected, onClick, arrow, onArrow)
-	local row = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, sub and 38 or 26),
-		AutoButtonColor = false,
-		Text = "",
-		BorderSizePixel = 0,
-		LayoutOrder = order,
-	})
-	if isSelected then
-		row.BackgroundColor3 = ACCENT
-		row.BackgroundTransparency = 0.55
-	else
-		row.BackgroundTransparency = 1
-	end
-	local x = 8 + indent
-	if arrow then
-		local a = new("TextButton", {
-			Position = UDim2.fromOffset(x - 2, 0),
-			Size = UDim2.new(0, 18, 1, 0),
-			BackgroundTransparency = 1,
-			Text = arrow,
-			Font = Enum.Font.GothamBold,
-			TextSize = 12,
-			TextColor3 = themeColor(C.DimmedText),
-		})
-		a.Parent = row
-		a.MouseButton1Click:Connect(onArrow)
-		x = x + 18
-	end
-	new("TextLabel", {
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(x, sub and 3 or 0),
-		Size = UDim2.new(1, -(x + 8), 0, sub and 18 or 26),
-		Font = Enum.Font.GothamMedium,
-		TextSize = 13,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		TextColor3 = themeColor(C.MainText),
-		Text = title,
-	}).Parent = row
-	if sub then
-		new("TextLabel", {
-			BackgroundTransparency = 1,
-			Position = UDim2.fromOffset(x, 21),
-			Size = UDim2.new(1, -(x + 8), 0, 14),
-			Font = Enum.Font.Code,
-			TextSize = 10,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-			TextColor3 = themeColor(C.DimmedText),
-			Text = sub,
-		}).Parent = row
-	end
-	row.MouseButton1Click:Connect(onClick)
-	row.Parent = insList
-	return row
+	updateInsHighlights()
 end
 
 local function sectionRow(order, key, title)
-	local row = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, 26),
-		AutoButtonColor = true,
-		Text = "",
-		BorderSizePixel = 0,
-		LayoutOrder = order,
-		BackgroundColor3 = themeColor(C.MainBackground),
-		BackgroundTransparency = 0.3,
-	})
-	new("TextLabel", {
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(8, 0),
-		Size = UDim2.new(1, -16, 1, 0),
-		Font = Enum.Font.GothamBold,
-		TextSize = 12,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextColor3 = themeColor(C.MainText),
-		Text = (sectionOpen[key] and "v  " or ">  ") .. title,
-	}).Parent = row
-	row.MouseButton1Click:Connect(function()
+	groupHeader(insList, order, (sectionOpen[key] and "v  " or ">  ") .. title, function()
 		sectionOpen[key] = not sectionOpen[key]
 		renderInserter()
 	end)
-	row.Parent = insList
 end
 
 local function matches(text, filter)
@@ -2089,6 +2263,8 @@ renderInserter = function()
 		return
 	end
 	clearRows(insList)
+	resetThumbs(insList)
+	insRows = {}
 	local filter = string.lower(clean(searchBox.Text))
 	local order = 0
 	local function nextOrder()
@@ -2125,21 +2301,42 @@ renderInserter = function()
 		end
 		for _, m in ipairs(models) do
 			local isOpen = expanded[m.key]
-			local isSel = selected and selected.kind == "model" and selected.item == m
-			local sub = (m.folder ~= nil and m.folder ~= "" and (m.folder .. "  -  ") or "") .. fmtBytes(m.bytes) .. "  -  " .. (m.date or "")
-			insRow(nextOrder(), 0, m.name, sub, isSel, function()
-				selectModel(m)
-			end, isOpen and "v" or ">", function()
-				expanded[m.key] = not expanded[m.key]
-				if expanded[m.key] then
-					loadModel(m, function()
-						renderInserter()
-					end)
-				end
-				renderInserter()
-			end)
+			local cache = modelCache[m.key]
+			local detail = "click the arrow to see its meshes"
+			if cache and cache.roots then
+				detail = string.format("%d parts  -  %d meshes", cache.partCount or 0, #(cache.parts or {}))
+			elseif cache and cache.err then
+				detail = cache.err
+			end
+			local folderText = (m.folder ~= nil and m.folder ~= "") and (m.folder .. "  -  ") or ""
+			local row = thumbRow(insList, nextOrder(), {
+				title = m.name,
+				lines = { folderText .. fmtBytes(m.bytes) .. "  -  " .. (m.date or ""), detail },
+				selected = selected and selected.kind == "model" and selected.item == m,
+				onClick = function()
+					selectModel(m)
+				end,
+				loader = function(cb)
+					local entry = waitModel(m)
+					if entry and entry.roots then
+						cb(cloneAll(entry.roots))
+					else
+						cb(nil)
+					end
+				end,
+				arrow = isOpen and "v" or ">",
+				onArrow = function()
+					expanded[m.key] = not expanded[m.key]
+					if expanded[m.key] then
+						loadModel(m, function()
+							renderInserter()
+						end)
+					end
+					renderInserter()
+				end,
+			})
+			insRows[m] = row
 			if isOpen then
-				local cache = modelCache[m.key]
 				if not cache or cache.loading then
 					makeNote(insList, "Loading...", nextOrder())
 				elseif cache.err then
@@ -2155,10 +2352,19 @@ renderInserter = function()
 								makeNote(insList, "...more parts hidden - use Search to narrow it down.", nextOrder())
 								break
 							end
-							local isPartSel = selected and selected.kind == "part" and selected.part == p
-							insRow(nextOrder(), 22, p.name, p.id .. "  -  " .. p.path, isPartSel, function()
-								selectPart(m, p)
-							end)
+							local prow = thumbRow(insList, nextOrder(), {
+								title = p.name,
+								lines = { p.id .. "  -  " .. p.inst.ClassName, p.path },
+								indent = 24,
+								selected = selected and selected.kind == "part" and selected.part == p,
+								onClick = function()
+									selectPart(m, p)
+								end,
+								loader = function(cb)
+									cb(cloneAll({ p.inst }))
+								end,
+							})
+							insRows[p] = prow
 						end
 					end
 				end
@@ -2184,11 +2390,22 @@ renderInserter = function()
 				break
 			end
 			local bones = tonumber(m.bones) or 0
-			local sub = m.id .. "  -  " .. tostring(m.tris or "?") .. " tris" .. (bones ~= 0 and "  -  skinned" or "")
-			local isSel = selected and selected.kind == "mesh" and selected.item == m
-			insRow(nextOrder(), 0, m.name, sub, isSel, function()
-				selectMesh(m)
-			end)
+			local row = thumbRow(insList, nextOrder(), {
+				title = m.name,
+				lines = {
+					m.id .. "  -  " .. tostring(m.tris or "?") .. " tris" .. (bones ~= 0 and "  -  skinned" or ""),
+					fmtSize(m.size) .. " studs  -  " .. fmtBytes(m.bytes),
+				},
+				selected = selected and selected.kind == "mesh" and selected.item == m,
+				onClick = function()
+					selectMesh(m)
+				end,
+				loader = function(cb)
+					local tpl = getMeshTemplate(m.id)
+					cb(tpl and { tpl:Clone() } or nil)
+				end,
+			})
+			insRows[m] = row
 		end
 	end
 end
@@ -2213,7 +2430,6 @@ refreshInserter = function()
 		table.sort(lib.meshes, byName)
 		table.sort(lib.models, byName)
 		lib.loaded = true
-		-- keep the selection pointing at the fresh data
 		if selected then
 			local list = selected.kind == "mesh" and lib.meshes or lib.models
 			local keyName = selected.kind == "mesh" and "id" or "key"
@@ -2224,12 +2440,11 @@ refreshInserter = function()
 					break
 				end
 			end
-			if found then
+			if found and selected.kind ~= "part" then
 				selected.item = found
 			else
 				selected = nil
-				setPreview(nil)
-				infoLabel.Text = ""
+				infoLabel.Text = "Pick a mesh or model to see its details."
 			end
 		end
 		setInsStatus(string.format("%d model(s), %d mesh(es) in your library.", #lib.models, #lib.meshes), nil)
@@ -2243,7 +2458,7 @@ searchBox:GetPropertyChangedSignal("Text"):Connect(function()
 		return
 	end
 	searchQueued = true
-	task.delay(0.2, function()
+	task.delay(0.25, function()
 		searchQueued = false
 		renderInserter()
 	end)
@@ -2278,7 +2493,7 @@ end
 
 insertButton.MouseButton1Click:Connect(function()
 	if not selected then
-		setInsStatus("Pick a mesh or model first.", RED)
+		setInsStatus("Pick a mesh or model first (click its name).", RED)
 		return
 	end
 	if selected.kind == "mesh" then
@@ -2294,14 +2509,12 @@ insertButton.MouseButton1Click:Connect(function()
 		setInsStatus("Inserted " .. m.name .. " (loads from your PC: rbxasset://meshtools/" .. m.id .. ".mesh).", GREEN)
 	elseif selected.kind == "part" then
 		local p = selected.part
-		local ok, c = pcall(function()
-			return p.inst:Clone()
-		end)
-		if not ok or not c then
+		local clones = cloneAll({ p.inst })
+		if #clones == 0 then
 			setInsStatus("Couldn't copy that part.", RED)
 			return
 		end
-		insertInstances({ c }, p.name)
+		insertInstances(clones, p.name)
 		setInsStatus("Inserted " .. p.name .. ".", GREEN)
 	else
 		local m = selected.item
@@ -2314,15 +2527,7 @@ insertButton.MouseButton1Click:Connect(function()
 			setInsStatus(entry.err or "This model couldn't be loaded.", RED)
 			return
 		end
-		local clones = {}
-		for _, r in ipairs(entry.roots) do
-			local ok, c = pcall(function()
-				return r:Clone()
-			end)
-			if ok and c then
-				table.insert(clones, c)
-			end
-		end
+		local clones = cloneAll(entry.roots)
 		insertInstances(clones, m.name)
 		setInsStatus(string.format("Inserted %s (%d object(s), folders and models kept).", m.name, #clones), GREEN)
 	end
@@ -2330,7 +2535,7 @@ end)
 
 revealButton.MouseButton1Click:Connect(function()
 	if not selected then
-		setInsStatus("Pick a mesh or model first.", RED)
+		setInsStatus("Pick a mesh or model first (click its name).", RED)
 		return
 	end
 	local path
