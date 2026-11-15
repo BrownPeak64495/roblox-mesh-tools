@@ -1,4 +1,12 @@
 {
-  "version": "3.1",
-  "files": ["RobloxMeshDownloader.ps1", "MeshCollector.lua", "README.txt", "Start Mesh Downloader.bat", "version.json"]
+  "version": "3.2",
+  "files": [
+    "RobloxMeshDownloader.ps1",
+    "MeshCollector.lua",
+    "README.txt",
+    "Start Mesh Downloader.bat",
+    "Mesh Downloader.vbs",
+    "MeshDownloader.ico",
+    "version.json"
+  ]
 }

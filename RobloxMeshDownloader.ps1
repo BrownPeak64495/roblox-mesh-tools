@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '3.1'
+$AppVersion = '3.2'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -16,6 +16,27 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Net.Http
 Add-Type -AssemblyName System.Security
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# No console window, so show startup errors in a popup instead of failing silently.
+trap {
+    try { [System.Windows.MessageBox]::Show("Mesh Downloader hit an error:`n`n" + $_.Exception.Message, 'Mesh Downloader') | Out-Null } catch { }
+    break
+}
+
+# Only one copy at a time (a second copy couldn't talk to Studio anyway).
+$script:mutexCreated = $false
+$script:appMutex = New-Object System.Threading.Mutex($true, 'Local\RobloxMeshDownloader', [ref]$script:mutexCreated)
+if (-not $script:mutexCreated) {
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    $got = $false
+    while ($wait.ElapsedMilliseconds -lt 6000) {   # give an updating copy time to close
+        try { if ($script:appMutex.WaitOne(500)) { $got = $true; break } } catch [System.Threading.AbandonedMutexException] { $got = $true; break }
+    }
+    if (-not $got) {
+        [System.Windows.MessageBox]::Show('Mesh Downloader is already open - check your taskbar.', 'Mesh Downloader') | Out-Null
+        exit
+    }
+}
 
 # ---------------- storage ----------------
 $AppDir       = Join-Path $env:APPDATA 'RobloxMeshDownloader'
@@ -53,6 +74,7 @@ function Load-Settings {
         installStudio = $true
         centerMesh   = $false
         updateUrl    = $DefaultUpdateUrl
+        shortcutFor  = ''
         retries      = 3
         delay        = 2000
     }
@@ -232,7 +254,7 @@ $xaml = @'
           </Border>
           <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="Mesh Downloader" Foreground="#F2F2F5" FontWeight="Bold" FontSize="15"/>
-            <TextBlock x:Name="VersionText" Text="v3.1" Foreground="#6F6F78" FontSize="11"/>
+            <TextBlock x:Name="VersionText" Text="v3.2" Foreground="#6F6F78" FontSize="11"/>
           </StackPanel>
         </StackPanel>
         <Border Grid.Column="1" CornerRadius="8" Background="#141418" BorderBrush="#2A2A31"
@@ -943,6 +965,44 @@ function Install-Plugin {
     }
 }
 
+# Desktop + Start menu shortcuts (made once per install folder; if you delete
+# them they stay deleted until the folder moves).
+function Install-Shortcuts {
+    try {
+        $vbs = Join-Path $PSScriptRoot 'Mesh Downloader.vbs'
+        if (-not (Test-Path -LiteralPath $vbs)) { return }
+        if ($script:shortcutFor -eq $vbs) { return }
+        $ico = Join-Path $PSScriptRoot 'MeshDownloader.ico'
+        $shell = New-Object -ComObject WScript.Shell
+        $made = 0
+        foreach ($dir in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+            if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
+            $lnk = $shell.CreateShortcut((Join-Path $dir 'Mesh Downloader.lnk'))
+            $lnk.TargetPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+            $lnk.Arguments = '"' + $vbs + '"'
+            $lnk.WorkingDirectory = $PSScriptRoot
+            if (Test-Path -LiteralPath $ico) { $lnk.IconLocation = "$ico,0" }
+            $lnk.Description = 'Mesh Downloader - Roblox mesh tools'
+            $lnk.Save()
+            $made++
+        }
+        $script:shortcutFor = $vbs
+        Save-Settings
+        if ($made -gt 0) { Log 'Added a Mesh Downloader icon to your Desktop and Start menu.' }
+    } catch {
+        Log ("Couldn't make the Desktop icon: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Set-WindowIcon {
+    try {
+        $ico = Join-Path $PSScriptRoot 'MeshDownloader.ico'
+        if (Test-Path -LiteralPath $ico) {
+            $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create((New-Object System.Uri($ico)))
+        }
+    } catch { }
+}
+
 # Update source = a web folder holding version.json + the tool files.
 # version.json: { "version": "3.1", "files": ["RobloxMeshDownloader.ps1", "MeshCollector.lua", ...] }
 function Check-Updates([switch]$Manual) {
@@ -982,7 +1042,7 @@ function Check-Updates([switch]$Manual) {
         Save-Settings
         Log "Updated to v$remote. Restarting..."
         $cmd = "Start-Sleep -Seconds 2; & '" + $PSCommandPath.Replace("'", "''") + "'"
-        Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Minimized', '-Command', $cmd
+        Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-Command', $cmd
         $window.Close()
     } catch {
         $ex = $_.Exception
@@ -1216,6 +1276,7 @@ function Save-Settings {
         installStudio = [bool]$TglInstall.IsChecked
         centerMesh   = [bool]$TglCenterMesh.IsChecked
         updateUrl    = $UpdateBox.Text.Trim()
+        shortcutFor  = [string]$script:shortcutFor
         retries      = Get-IntSetting $RetriesBox.Text 3 0 10
         delay        = Get-IntSetting $DelayBox.Text 2000 0 60000
     }
@@ -1533,6 +1594,7 @@ $TglInstall.IsChecked = [bool]$settings.installStudio
 $TglCenterMesh.IsChecked = [bool]$settings.centerMesh
 if (-not [string]$settings.updateUrl) { $settings.updateUrl = $DefaultUpdateUrl }
 $UpdateBox.Text = [string]$settings.updateUrl
+$script:shortcutFor = [string]$settings.shortcutFor
 $RetriesBox.Text = [string]$settings.retries
 $DelayBox.Text = [string]$settings.delay
 
@@ -1615,6 +1677,7 @@ $BtnSync.Add_Click({
 })
 
 $window.Add_Closed({
+    try { $script:appMutex.ReleaseMutex() } catch { }
     $timer.Stop()
     Stop-Link
     Save-Settings
@@ -1624,6 +1687,8 @@ $window.Add_Closed({
 # ---------------- start ----------------
 if ($TglListen.IsChecked) { Start-Link } else { Set-Link 'off' 'Studio link: off' }
 Load-Index
+Set-WindowIcon
+Install-Shortcuts
 Install-Plugin
 Sync-Studio -Quiet
 $timer.Start()
