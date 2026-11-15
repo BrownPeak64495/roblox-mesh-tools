@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '4.1'
+$AppVersion = '4.2'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -46,6 +46,8 @@ $SettingsFile = Join-Path $AppDir 'settings.json'
 # Only small settings + the encrypted API key stay in AppData.
 $LibDir       = Join-Path $PSScriptRoot 'library'       # permanent copy of every .mesh (named <id>.mesh)
 $IndexFile    = Join-Path $PSScriptRoot 'library.json'  # names + stats for the Inserter
+$TexDir       = Join-Path $LibDir 'textures'   # downloaded texture images (<id>.png / .jpg)
+$LookDir      = Join-Path $LibDir 'looks'      # each mesh's look (texture, SurfaceAppearance, colour) as .rbxm
 if (-not (Test-Path $AppDir)) { New-Item -ItemType Directory -Path $AppDir | Out-Null }
 if (-not (Test-Path $LibDir)) { New-Item -ItemType Directory -Path $LibDir | Out-Null }
 # Move a library from older versions (kept in AppData on the C: drive) next to the app.
@@ -270,7 +272,7 @@ $xaml = @'
           </Border>
           <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="Mesh Downloader" Foreground="#F2F2F5" FontWeight="Bold" FontSize="15"/>
-            <TextBlock x:Name="VersionText" Text="v4.1" Foreground="#6F6F78" FontSize="11"/>
+            <TextBlock x:Name="VersionText" Text="v4.2" Foreground="#6F6F78" FontSize="11"/>
           </StackPanel>
         </StackPanel>
         <Border Grid.Column="1" CornerRadius="8" Background="#141418" BorderBrush="#2A2A31"
@@ -732,11 +734,49 @@ function Sync-Studio([switch]$Quiet) {
                     try { Copy-Item -LiteralPath $f.FullName -Destination $dest; $copied++ } catch { }
                 }
             }
+            $tt = Join-Path $t 'textures'
+            foreach ($f in @(Get-ChildItem $TexDir -File -ErrorAction SilentlyContinue)) {
+                try {
+                    if (-not (Test-Path $tt)) { New-Item -ItemType Directory -Path $tt -Force | Out-Null }
+                    $dest = Join-Path $tt $f.Name
+                    if (-not (Test-Path $dest)) { Copy-Item -LiteralPath $f.FullName -Destination $dest; $copied++ }
+                } catch { }
+            }
         }
         if ($copied -gt 0 -and -not $Quiet) { Log ("Installed {0} mesh file(s) into Studio." -f $copied) }
         if ($copied -gt 0 -and $Quiet) { Log ("Re-installed {0} mesh file(s) into Studio (it may have updated)." -f $copied) }
     }
     Update-StudioStatus
+}
+
+# id -> file name of every downloaded texture
+function Get-TextureMap {
+    $map = @{}
+    foreach ($f in @(Get-ChildItem $TexDir -File -ErrorAction SilentlyContinue)) { $map[$f.BaseName] = $f.Name }
+    return $map
+}
+
+function Install-Texture([string]$id, [byte[]]$bytes) {
+    $ext = '.png'
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xD8) { $ext = '.jpg' }
+    elseif ($bytes.Length -ge 4 -and $bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50) { $ext = '.png' }
+    else {
+        $head = [Text.Encoding]::ASCII.GetString($bytes, 0, [Math]::Min(16, $bytes.Length))
+        if ($head.StartsWith('version ') -or $head.StartsWith('<roblox')) { return $null }   # not an image
+    }
+    if (-not (Test-Path $TexDir)) { New-Item -ItemType Directory -Path $TexDir -Force | Out-Null }
+    $name = "$id$ext"
+    [IO.File]::WriteAllBytes((Join-Path $TexDir $name), $bytes)
+    if ($TglInstall.IsChecked) {
+        foreach ($d in $script:studioDirs) {
+            try {
+                $t = Join-Path $d 'meshtools\textures'
+                if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force | Out-Null }
+                [IO.File]::WriteAllBytes((Join-Path $t $name), $bytes)
+            } catch { }
+        }
+    }
+    return $name
 }
 
 function Install-Mesh([string]$id, [byte[]]$bytes) {
@@ -918,6 +958,7 @@ function Get-LibraryData {
         $meshes.Add(@{
             id = $id; name = [string]$e.name; file = $e.file; version = $e.version; verts = $e.verts; tris = $e.tris
             bones = $e.bones; size = $e.size; bytes = $e.bytes; date = $e.date
+            look = (Test-Path -LiteralPath (Join-Path $LookDir "$id.rbxm"))
         })
     }
     if ($changed) { Save-Index }
@@ -935,7 +976,7 @@ function Get-LibraryData {
             })
         }
     }
-    return @{ ok = $true; meshes = [object[]]$meshes.ToArray(); models = [object[]]$models.ToArray() }
+    return @{ ok = $true; meshes = [object[]]$meshes.ToArray(); models = [object[]]$models.ToArray(); textures = (Get-TextureMap) }
 }
 
 
@@ -1319,6 +1360,7 @@ $script:paused = $false
 $script:stop = $false
 $script:closeAfter = $false
 $script:autoStartPending = $false
+$script:texQueue = New-Object 'System.Collections.Generic.HashSet[string]'
 
 function Start-Batch {
     $key = $KeyBox.Password.Trim()
@@ -1331,7 +1373,7 @@ function Start-Batch {
     $root = (Resolve-Path $root).ProviderPath
 
     $entries = Get-Entries $IdsBox.Text
-    if ($entries.Count -eq 0) { Log 'Nothing to download - paste some IDs (5+ digits) first.'; return }
+    if ($entries.Count -eq 0 -and $script:texQueue.Count -eq 0) { Log 'Nothing to download - paste some IDs (5+ digits) first.'; return }
 
     Save-ApiKey $key
     Save-Settings
@@ -1364,6 +1406,25 @@ function Start-Batch {
         if (Save-Asset $e $r.Bytes $root) { $ok++ } else { $fail++; $putBack.Add($e.Raw) }
         Wait-Ms 150
     }
+
+    # textures the plugin asked for (TextureID / SurfaceAppearance images)
+    $texIds = @($script:texQueue)
+    $script:texQueue.Clear()
+    $texOk = 0; $texHave = 0
+    $texMap = Get-TextureMap
+    foreach ($tid in $texIds) {
+        if ($script:stop) { break }
+        if ($texMap.ContainsKey($tid)) { $texHave++; continue }
+        $RunSummary.Text = "Downloading textures..."
+        $r = Get-AssetBytes $tid $key $retries $delay
+        if ($r.Ok) {
+            if (Install-Texture $tid $r.Bytes) { $texOk++ }
+        } else {
+            Log ("[texture {0}] FAILED: {1}" -f $tid, $r.Error)
+        }
+        Wait-Ms 120
+    }
+    if ($texIds.Count -gt 0) { Log ("Textures: {0} downloaded, {1} already saved." -f $texOk, $texHave) }
 
     if ($putBack.Count -gt 0) {
         Add-ToQueue $putBack
@@ -1411,6 +1472,23 @@ function Send-Json($ctx, $obj, [int]$code = 200) {
     } catch { }
 }
 
+# Sends one base64 chunk of a file (big files go in several requests)
+function Send-FileChunk($ctx, [string]$full, [int]$chunk) {
+    if ($chunk -eq 0 -or $script:modelBytesCache.key -ne $full) {
+        $script:modelBytesCache = @{ key = $full; bytes = [IO.File]::ReadAllBytes($full) }
+    }
+    [byte[]]$fb = $script:modelBytesCache.bytes
+    $size = 524286
+    $count = [Math]::Max(1, [int][Math]::Ceiling($fb.Length / $size))
+    if ($chunk -lt 0 -or $chunk -ge $count) { Send-Json $ctx @{ ok = $false; error = 'bad chunk' } 400; return }
+    $start = $chunk * $size
+    $len = [Math]::Min($size, $fb.Length - $start)
+    Send-Json $ctx @{
+        ok = $true; chunk = $chunk; count = $count; ext = [IO.Path]::GetExtension($full)
+        data = [Convert]::ToBase64String($fb, $start, $len)
+    }
+}
+
 function Handle-Request($ctx) {
     try {
         $path = $ctx.Request.Url.AbsolutePath.TrimEnd('/')
@@ -1437,10 +1515,17 @@ function Handle-Request($ctx) {
                 if ($noId) { $line += ' | noid' }
                 $lines.Add($line)
             }
+            $tex = 0
+            foreach ($it in @($data.items)) {
+                foreach ($tid in @($it.textures)) {
+                    $t = [string]$tid
+                    if ($t -match '^\d{5,}$' -and $script:texQueue.Add($t)) { $tex++ }
+                }
+            }
             Add-ToQueue $lines
-            Send-Json $ctx @{ ok = $true; queued = $lines.Count; busy = $script:busy }
-            Log ("Received {0} ID(s) from Studio." -f $lines.Count)
-            if ($data.autoStart -and $lines.Count -gt 0) { $script:autoStartPending = $true }
+            Send-Json $ctx @{ ok = $true; queued = $lines.Count; textures = $tex; busy = $script:busy }
+            Log ("Received {0} ID(s) and {1} texture(s) from Studio." -f $lines.Count, $tex)
+            if ($data.autoStart -and ($lines.Count -gt 0 -or $tex -gt 0)) { $script:autoStartPending = $true }
             return
         }
         if ($path -eq '/status' -and $ctx.Request.HttpMethod -eq 'POST') {
@@ -1469,6 +1554,7 @@ function Handle-Request($ctx) {
                 ok          = $true
                 studioFound = ($script:studioDirs.Count -gt 0)
                 inbox       = (Get-InboxDir)
+                textures    = (Get-TextureMap)
                 installOn   = [bool]$TglInstall.IsChecked
                 installed   = [object[]]$installed.ToArray()
                 missing     = [object[]]$missing.ToArray()
@@ -1479,6 +1565,15 @@ function Handle-Request($ctx) {
         if ($path -eq '/library') {
             $script:lastPing = Get-Date
             Send-Json $ctx (Get-LibraryData)
+            return
+        }
+        if ($path -eq '/look') {
+            $id = [string]$ctx.Request.QueryString['id']
+            $chunk = 0
+            [void][int]::TryParse([string]$ctx.Request.QueryString['chunk'], [ref]$chunk)
+            $full = Join-Path $LookDir "$id.rbxm"
+            if ($id -notmatch '^\d{5,}$' -or -not (Test-Path -LiteralPath $full)) { Send-Json $ctx @{ ok = $false; error = 'no look saved' } 404; return }
+            Send-FileChunk $ctx $full $chunk
             return
         }
         if ($path -eq '/model') {
@@ -1522,6 +1617,14 @@ function Handle-Request($ctx) {
 
             $script:uploads.Remove($uid)
             [byte[]]$mb = [Convert]::FromBase64String(($up.parts -join ''))
+            if ([string]$d.kind -eq 'look') {
+                $lid = [string]$d.name
+                if ($lid -notmatch '^\d{5,}$') { Send-Json $ctx @{ ok = $false; error = 'bad id' } 400; return }
+                if (-not (Test-Path $LookDir)) { New-Item -ItemType Directory -Path $LookDir -Force | Out-Null }
+                [IO.File]::WriteAllBytes((Join-Path $LookDir "$lid.rbxm"), $mb)
+                Send-Json $ctx @{ ok = $true; done = $true; path = "looks\$lid.rbxm" }
+                return
+            }
             $root = Get-SaveRoot
             if (-not $root) { Send-Json $ctx @{ ok = $false; error = 'no save folder set in Mesh Downloader' } 500; return }
             $sub = 'Models'

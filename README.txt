@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v4.1
+ROBLOX MESH TOOLS v4.2
 ======================
 
 What's in here
@@ -39,52 +39,73 @@ WHERE THINGS GO  (inside the folder you installed to, e.g. your external drive)
 MESH COLLECTOR (Studio)  - tabs: Collector | Settings
 --------------------------------------------------
 Click any model/part - the cards update live, grouped by model.
-Click a card's name to select that part in Studio; click a model's
-header to select the whole model.
+  click a card          -> selects that part in Studio
+  click a card's NAME   -> rename it (the file gets that name)
+  click a model header  -> selects the whole model
 
 Buttons:
-  Send to Downloader   download the listed meshes
+  Send to Downloader   downloads the meshes AND their textures, and saves
+                       each mesh's "look" (texture, SurfaceAppearance,
+                       colour) so the Inserter can insert it textured
   Build local copy     copy of the model with real MeshParts loading your
-                       .mesh files (rbxasset://meshtools/<id>.mesh), saved
-                       automatically to Local Models
-  Save model           saves the selected model to Models (no save window)
-  Apply pivots         applies the pivot settings to the selection now
-  Copy list            fallback if the app link isn't working
-  Open Inserter
+                       .mesh files (and downloaded textures), saved to
+                       Local Models
+  Save model           saves the selected model to Models
+  Reset pivots         see PIVOTS below
+  Restore pivots       puts the original pivots back
+  Copy list / Open Inserter
 
 --------------------------------------------------
 MESH INSERTER (Studio)  - tabs: Library | Settings
 --------------------------------------------------
-MODELS - press + on a model card to show its meshes below
-MESHES - every downloaded .mesh
-Click a card's name -> details + Insert / Show in folder.
-Insert: a mesh -> MeshPart loading your local .mesh; a model -> the whole
-thing with its folders/models; a part -> just that part.
+MODELS - press + (or "Show meshes" in the big view) to inspect a model:
+         a big 3D view of it appears with its meshes as cards below.
+         Click a part in the 3D view -> its card is found and selected.
+         Click a card -> that part lights up in the 3D view.
+MESHES - every downloaded .mesh ("textured" = its look was saved)
+"When inserting: Keep pivots / Reset pivots" sits at the top.
+
+Insert:  click Insert, or DRAG a card into the 3D view: the card lifts
+out and follows the mouse, flies back when you leave the window, and the
+object appears under your cursor - let go (or click) to place it,
+right-click to cancel.
 
 --------------------------------------------------
 3D PREVIEWS (every card)
 --------------------------------------------------
-  hover   -> smoothly grows into a big preview; move away -> shrinks back
-  click   -> opens big and stays open (click it again to let go)
-  drag    -> rotate,  scroll -> zoom
-The light follows your view (or pick Flat lighting in Settings).
+  click the preview  -> it grows into a big view (hover can do this too:
+                        Settings > "Also open the big view on hover")
+  big view buttons   -> Keep open, Insert, Show meshes (models), X
+  drag               -> rotate,  scroll -> zoom
+  corner "//"        -> drag to resize the big view
+While the mouse is over the big view, nothing behind it can be clicked or
+scrolled. It shrinks back when the mouse leaves (unless Kept open).
+
+--------------------------------------------------
+PIVOTS
+--------------------------------------------------
+Settings > Pivots:
+  Model centre:         Middle (centre of the box around the model)
+                        or Average (average position of all its parts)
+  Reset pivots changes: Model only | Parts only | Both
+     Model only keeps each mesh's own pivot (its offset stays).
+  Reset pivots when building / saving / inserting: on/off
+The ORIGINAL pivots are saved on the objects as attributes, so
+"Restore pivots" always puts them back - even after saving or inserting.
 
 --------------------------------------------------
 SETTINGS TAB (same in both windows)
 --------------------------------------------------
-Appearance: Theme (Studio / Dark / Classic grey / Midnight), accent colour,
-            font, text size, corner roundness, animation speed (or off)
-Layout:     Grid boxes or List rows, card size, spacing, details on cards,
-            max items shown, Inserter details panel above/below the list
-Previews:   spin on/off + speed, grow on hover on/off + delay, big preview
-            size, lighting
-Naming:     Name files by Part / Parent / Model / Top / Custom, custom name,
-            add part name, add mesh ID, folder per model
-Pivots:     Model pivot Keep / Middle / Average, center part pivots
-              Middle  = centre of the box around the whole model
-              Average = average position of all its parts
-Collector:  Live, download right away
-Reset all settings
+Size:       UI scale (whole window), text size, card size, spacing,
+            big preview size  - all sliders
+Appearance: Theme (Studio / Dark / Classic grey / Midnight), accent
+            colour, font, corner roundness, animation speed (or off)
+Layout:     Grid boxes or List rows, details on cards, max items,
+            Inserter details panel above/below the list
+Previews:   open on hover (off by default) + hover wait, grow/shrink
+            speed, ignore clicks right after it opens, spin + speed,
+            lighting
+Naming, Pivots, Collector options, Reset all settings
 
 --------------------------------------------------
 APP OPTIONS

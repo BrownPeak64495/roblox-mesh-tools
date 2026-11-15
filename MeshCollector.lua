@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "4.1" -- keep in sync with version.json
+local PLUGIN_VERSION = "4.2" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -56,7 +56,11 @@ local DEFAULTS = {
 	partPivots = false,
 	live = true,
 	autoStart = true,
+	pivotMode = "middle", -- middle | average
+	pivotScope = "both", -- model | parts | both
+	pivotOnInsert = false, -- reset pivots when building / saving / inserting
 	-- appearance
+	uiScale = 100, -- percent
 	theme = "studio", -- studio | dark | classic | midnight
 	accent = "purple",
 	font = "gotham", -- gotham | sourcesans | arial
@@ -73,9 +77,11 @@ local DEFAULTS = {
 	-- previews
 	spin = true,
 	spinSpeed = 8, -- tenths
-	hoverEnlarge = true,
+	hoverExpand = false, -- open the big preview on hover (clicking always works)
 	hoverDelay = 4, -- tenths of a second
-	bigSize = 240,
+	expandSpeed = 3, -- tenths of a second for the grow / shrink animation
+	clickGuard = 3, -- tenths of a second: clicks ignored right after the big preview opens
+	bigSize = 260,
 	lighting = "follow", -- follow | flat
 }
 
@@ -111,6 +117,26 @@ for k, d in pairs(DEFAULTS) do
 	S[k] = v
 end
 
+-- move old pivot settings over
+if readSetting("v4_pivotMode") == nil and (S.modelPivot == "middle" or S.modelPivot == "average") then
+	S.pivotMode = S.modelPivot
+	S.pivotOnInsert = true
+end
+if readSetting("v4_pivotScope") == nil then
+	S.pivotScope = S.partPivots and "both" or "model"
+end
+
+-- names you typed for meshes in the Collector (mesh id -> name)
+local renames = readSetting("v4_renames")
+if type(renames) ~= "table" then
+	renames = {}
+end
+local function saveRenames()
+	pcall(function()
+		plugin:SetSetting("v4_renames", renames)
+	end)
+end
+
 local function save(key, value)
 	S[key] = value
 	pcall(function()
@@ -138,6 +164,25 @@ local function tween(inst, props, mult, style)
 	end
 	local ok, tw = pcall(function()
 		return TweenService:Create(inst, TweenInfo.new(t, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+	end)
+	if ok and tw then
+		tw:Play()
+		return tw
+	end
+	return nil
+end
+
+local function tweenFor(inst, props, seconds, style)
+	if S.anim == "off" or seconds <= 0 then
+		for k, v in pairs(props) do
+			pcall(function()
+				inst[k] = v
+			end)
+		end
+		return nil
+	end
+	local ok, tw = pcall(function()
+		return TweenService:Create(inst, TweenInfo.new(seconds, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
 	end)
 	if ok and tw then
 		tw:Play()
@@ -182,23 +227,17 @@ local PALETTES = {
 
 local function studioPalette()
 	local th = Studio.Theme
-	-- colours are looked up by name so a missing one can't break the plugin
-	local function g(name, hover)
+	local function g(c, m)
 		local ok, v = pcall(function()
-			if hover then
-				return th:GetColor(C[name], Enum.StudioStyleGuideModifier.Hover)
-			end
-			return th:GetColor(C[name])
+			return th:GetColor(c, m)
 		end)
-		return ok and v or nil
+		return ok and v or rgb(128, 128, 128)
 	end
-	local bg = g("MainBackground") or rgb(46, 46, 46)
 	return {
-		bg = bg, panel = bg, input = g("InputFieldBackground") or rgb(37, 37, 37), border = g("Border") or rgb(34, 34, 34),
-		text = g("MainText") or rgb(220, 220, 220), dim = g("DimmedText") or rgb(140, 140, 140),
-		button = g("Button") or rgb(60, 60, 60), buttonText = g("ButtonText") or rgb(220, 220, 220),
-		card = g("InputFieldBackground") or rgb(37, 37, 37), cardHover = g("Button", true) or rgb(70, 70, 70),
-		preview = g("ViewPortBackground") or rgb(30, 30, 30), header = g("Titlebar") or rgb(53, 53, 53),
+		bg = g(C.MainBackground), panel = g(C.MainBackground), input = g(C.InputFieldBackground), border = g(C.Border),
+		text = g(C.MainText), dim = g(C.DimmedText), button = g(C.Button), buttonText = g(C.ButtonText),
+		card = g(C.InputFieldBackground), cardHover = g(C.Button, Enum.StudioStyleGuideModifier.Hover),
+		preview = g(C.ViewPortBackground), header = g(C.Titlebar),
 	}
 end
 
@@ -630,6 +669,100 @@ local function stepper(label_, key, order, min, max, step, fmt, onChange)
 	return row
 end
 
+-- Draggable slider: "Label            value" over a track with a knob
+local function slider(label_, key, order, min, max, step, fmt, onChange)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, LayoutOrder = order })
+	text({ Text = label_, Size = UDim2.new(1, -80, 0, 18), TextTruncate = Enum.TextTruncate.AtEnd }, 12, "regular", "text").Parent = row
+	local value = text({
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.fromOffset(80, 18),
+		TextXAlignment = Enum.TextXAlignment.Right,
+	}, 12, "bold", "text")
+	value.Parent = row
+	local track = new("Frame", { Position = UDim2.new(0, 9, 0, 26), Size = UDim2.new(1, -18, 0, 6), BorderSizePixel = 0 }, {
+		new("UICorner", { CornerRadius = UDim.new(1, 0) }),
+	})
+	bind(track, "BackgroundColor3", "border")
+	track.Parent = row
+	local fill = new("Frame", { Size = UDim2.new(0, 0, 1, 0), BorderSizePixel = 0 }, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+	bind(fill, "BackgroundColor3", "accent")
+	fill.Parent = track
+	local knob = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0, 0, 0.5, 0),
+		Size = UDim2.fromOffset(16, 16),
+		BackgroundColor3 = WHITE,
+		ZIndex = 2,
+	}, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+	local ks = new("UIStroke", { Thickness = 2 })
+	bind(ks, "Color", "accent")
+	ks.Parent = knob
+	knob.Parent = track
+	local hit = new("TextButton", {
+		Position = UDim2.new(0, -9, 0, -12),
+		Size = UDim2.new(1, 18, 1, 24),
+		BackgroundTransparency = 1,
+		Text = "",
+		ZIndex = 3,
+	})
+	hit.Parent = track
+	local dragging = false
+	local function render(anim)
+		local f = math.clamp((S[key] - min) / (max - min), 0, 1)
+		value.Text = fmt(S[key])
+		if anim and not dragging then
+			tween(fill, { Size = UDim2.new(f, 0, 1, 0) })
+			tween(knob, { Position = UDim2.new(f, 0, 0.5, 0) })
+		else
+			fill.Size = UDim2.new(f, 0, 1, 0)
+			knob.Position = UDim2.new(f, 0, 0.5, 0)
+		end
+	end
+	local function setFromX(x)
+		local f = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+		local v = min + f * (max - min)
+		v = math.clamp(math.floor(v / step + 0.5) * step, min, max)
+		if v ~= S[key] then
+			S[key] = v
+			render(false)
+		end
+	end
+	local function finish()
+		if not dragging then
+			return
+		end
+		dragging = false
+		tween(knob, { Size = UDim2.fromOffset(16, 16) })
+		save(key, S[key])
+		syncControls(true)
+		if onChange then
+			onChange()
+		end
+	end
+	hit.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			tween(knob, { Size = UDim2.fromOffset(20, 20) }, 0.6)
+			setFromX(input.Position.X)
+		end
+	end)
+	hit.InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			setFromX(input.Position.X)
+		end
+	end)
+	hit.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			finish()
+		end
+	end)
+	row.MouseLeave:Connect(finish)
+	render(false)
+	table.insert(controlRenderers, render)
+	return row
+end
+
 -- Accent colour picker
 local function swatches(order, onChange)
 	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = order }, { hlist(8) })
@@ -983,26 +1116,29 @@ end
 
 -------------------------------------------------------------------
 -- Pivots
+-- Reset saves the ORIGINAL pivots as attributes on the objects, so
+-- "Restore pivots" can always put them back (even after saving/inserting).
 -------------------------------------------------------------------
-local function centerPartPivots(root)
+local PIVOT_ATTR = "MeshTools_OriginalPivot" -- models: WorldPivot before a reset
+local OFFSET_ATTR = "MeshTools_OriginalPivotOffset" -- parts: PivotOffset before a reset
+
+local function partsOf(root)
 	local list = root:GetDescendants()
 	table.insert(list, root)
+	local out = {}
 	for _, d in ipairs(list) do
 		if d:IsA("BasePart") then
-			pcall(function()
-				d.PivotOffset = CFrame.new()
-			end)
+			table.insert(out, d)
 		end
 	end
+	return out
 end
 
 local function averagePosition(model)
 	local sum, n = Vector3.zero, 0
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("BasePart") then
-			sum = sum + d.Position
-			n = n + 1
-		end
+	for _, p in ipairs(partsOf(model)) do
+		sum = sum + p.Position
+		n = n + 1
 	end
 	if n == 0 then
 		return nil
@@ -1010,32 +1146,102 @@ local function averagePosition(model)
 	return sum / n
 end
 
-local function setModelPivot(model, mode)
-	if mode == "keep" or not model:IsA("Model") then
-		return
+local function pivotTarget(model)
+	local pivot = model:GetPivot()
+	local rot = pivot - pivot.Position
+	local pos
+	if S.pivotMode == "average" then
+		pos = averagePosition(model)
+	else
+		local cf = model:GetBoundingBox()
+		pos = cf.Position
 	end
-	pcall(function()
-		local pivot = model:GetPivot()
-		local rot = pivot - pivot.Position
-		local pos = nil
-		if mode == "middle" then
-			local cf = model:GetBoundingBox()
-			pos = cf.Position
-		else
-			pos = averagePosition(model)
-		end
-		if pos then
-			model.WorldPivot = CFrame.new(pos) * rot
-		end
-	end)
+	if pos then
+		return CFrame.new(pos) * rot
+	end
+	return nil
 end
 
-local function applyPivots(roots)
+-- What "Reset pivots" does, in words (shown under the buttons)
+local function pivotSummary()
+	local center = S.pivotMode == "average" and "Average" or "Middle"
+	if S.pivotScope == "model" then
+		return "Reset pivots: the model's pivot -> " .. center .. ". Each part keeps its own pivot."
+	elseif S.pivotScope == "parts" then
+		return "Reset pivots: every part's pivot -> its own center. The model's pivot is kept."
+	end
+	return "Reset pivots: model -> " .. center .. ", and every part -> its own center."
+end
+
+local function resetPivots(roots)
+	local changed = 0
 	for _, r in ipairs(roots) do
-		if S.partPivots then
-			centerPartPivots(r)
+		local doModel = S.pivotScope ~= "parts" and r:IsA("Model")
+		local doParts = S.pivotScope ~= "model"
+		if doModel and r:GetAttribute(PIVOT_ATTR) == nil then
+			pcall(function()
+				r:SetAttribute(PIVOT_ATTR, r.WorldPivot)
+			end)
 		end
-		setModelPivot(r, S.modelPivot)
+		if doParts then
+			for _, p in ipairs(partsOf(r)) do
+				pcall(function()
+					if p:GetAttribute(OFFSET_ATTR) == nil then
+						p:SetAttribute(OFFSET_ATTR, p.PivotOffset)
+					end
+					p.PivotOffset = CFrame.new()
+				end)
+				changed = changed + 1
+			end
+		end
+		if doModel then
+			pcall(function()
+				local target = pivotTarget(r)
+				if target then
+					r.WorldPivot = target
+				end
+			end)
+			changed = changed + 1
+		end
+	end
+	return changed
+end
+
+local function restorePivots(roots)
+	local restored = 0
+	for _, r in ipairs(roots) do
+		for _, p in ipairs(partsOf(r)) do
+			local o = p:GetAttribute(OFFSET_ATTR)
+			if typeof(o) == "CFrame" then
+				pcall(function()
+					p.PivotOffset = o
+					p:SetAttribute(OFFSET_ATTR, nil)
+				end)
+				restored = restored + 1
+			end
+		end
+		local list = r:GetDescendants()
+		table.insert(list, r)
+		for _, d in ipairs(list) do
+			if d:IsA("Model") then
+				local o = d:GetAttribute(PIVOT_ATTR)
+				if typeof(o) == "CFrame" then
+					pcall(function()
+						d.WorldPivot = o
+						d:SetAttribute(PIVOT_ATTR, nil)
+					end)
+					restored = restored + 1
+				end
+			end
+		end
+	end
+	return restored
+end
+
+-- Used by Build / Save / Insert: only resets when that option is on
+local function applyPivots(roots)
+	if S.pivotOnInsert then
+		resetPivots(roots)
 	end
 end
 
@@ -1305,6 +1511,10 @@ local function makeWidget(id, title, w, h, tabNames)
 
 	local root = new("Frame", { Size = UDim2.fromScale(1, 1), BorderSizePixel = 0 }, { padding(10, 10, 10, 10), vlist(8) })
 	bind(root, "BackgroundColor3", "bg")
+	-- UI scale: shrink/grow everything, and resize the root so it still fills the window
+	local uiScale = new("UIScale", { Scale = S.uiScale / 100 })
+	uiScale.Parent = root
+	root.Size = UDim2.fromScale(100 / S.uiScale, 100 / S.uiScale)
 	local grad = new("UIGradient", { Rotation = 90 })
 	grad.Parent = root
 	gradients[grad] = true
@@ -1340,7 +1550,7 @@ local function makeWidget(id, title, w, h, tabNames)
 	holder.Parent = root
 
 	local ctx = {
-		id = id, widget = widget, root = root, holder = holder, pages = {}, tabs = {},
+		id = id, widget = widget, root = root, holder = holder, pages = {}, tabs = {}, uiScale = uiScale,
 		tabIndex = {}, tabCount = n, indicator = indicator, current = nil,
 	}
 	for i, name in ipairs(tabNames) do
@@ -1359,6 +1569,14 @@ local function makeWidget(id, title, w, h, tabNames)
 	end
 	table.insert(widgets, ctx)
 	return ctx
+end
+
+local function applyUiScale()
+	for _, ctx in ipairs(widgets) do
+		local sc = S.uiScale / 100
+		tween(ctx.uiScale, { Scale = sc }, 1.2)
+		tween(ctx.root, { Size = UDim2.fromScale(1 / sc, 1 / sc) }, 1.2)
+	end
 end
 
 switchTab = function(ctx, name, instant)
@@ -1397,8 +1615,12 @@ switchTab = function(ctx, name, instant)
 end
 
 -------------------------------------------------------------------
--- 3D previews: small spinning ones on every card + a pop-up that
--- smoothly grows out of the card you hover / click.
+-- 3D previews
+--  * every card has a small spinning preview
+--  * CLICK it (or hover, if turned on in Settings) and it grows into a
+--    big view with buttons: Keep open, Insert, Show meshes, close
+--  * the big view can be resized from its corner; while your mouse is
+--    over it, nothing behind it can be clicked or scrolled
 -------------------------------------------------------------------
 local thumbLists = {} -- list -> { ctx, thumbs }
 local loadingThumbs = 0
@@ -1442,7 +1664,7 @@ local function orbitCamera(o)
 	local rot = CFrame.Angles(0, o.yaw, 0) * CFrame.Angles(-o.pitch, 0, 0)
 	o.cam.CFrame = CFrame.lookAt(rot * Vector3.new(0, 0, dist), Vector3.zero)
 	if S.lighting ~= "flat" then
-		o.vp.LightDirection = o.cam.CFrame.LookVector -- light follows the view: the side you see is lit
+		o.vp.LightDirection = o.cam.CFrame.LookVector
 	end
 end
 
@@ -1466,9 +1688,57 @@ local function frameContent(o, holder)
 	if ok and size and size.Magnitude > 0 then
 		holder:TranslateBy(-cf.Position)
 		o.radius = math.max(size.Magnitude / 2, 0.1)
-	else
-		o.radius = 2
+		return true
 	end
+	o.radius = 2
+	return false
+end
+
+-- Why might a preview be blank? (shown on the card)
+local function invisibleReason(holder)
+	local parts, visible = 0, 0
+	for _, d in ipairs(holder:GetDescendants()) do
+		if d:IsA("BasePart") then
+			parts = parts + 1
+			if d.Transparency < 0.98 then
+				visible = visible + 1
+			end
+		end
+	end
+	if parts == 0 then
+		return "nothing to show"
+	elseif visible == 0 then
+		return "invisible part (Transparency 1)"
+	end
+	return nil
+end
+
+local function expandSeconds()
+	if S.anim == "off" then
+		return 0
+	end
+	return S.expandSpeed / 10
+end
+
+-- Big view (one per window) ---------------------------------------------
+local function popButton(label_, primary)
+	local b = new("TextButton", {
+		Size = UDim2.new(0, 0, 1, 0),
+		AutomaticSize = Enum.AutomaticSize.X,
+		Text = label_,
+		AutoButtonColor = false,
+		ZIndex = 44,
+	}, { new("UICorner", { CornerRadius = UDim.new(1, 0) }), padding(0, 10, 0, 10) })
+	bindText(b, 11, "bold")
+	if primary then
+		bind(b, "BackgroundColor3", "accent")
+		bind(b, "TextColor3", "accentText")
+	else
+		bind(b, "BackgroundColor3", "button")
+		bind(b, "TextColor3", "buttonText")
+	end
+	pressable(b)
+	return b
 end
 
 local function attachPop(ctx)
@@ -1480,23 +1750,46 @@ local function attachPop(ctx)
 	bind(st, "Color", "accent")
 	st.Parent = box
 	box.Parent = layer
-	local vp, cam, world = newViewport({ Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 1, -38), ZIndex = 42, Active = true })
+	-- invisible shield: swallows clicks so nothing behind the big view reacts
+	local shield = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 41 })
+	shield.Parent = box
+	local bar = new("Frame", { Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 0, 24), BackgroundTransparency = 1, ZIndex = 43 }, {
+		new("UIListLayout", {
+			FillDirection = Enum.FillDirection.Horizontal,
+			HorizontalAlignment = Enum.HorizontalAlignment.Right,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+			Padding = UDim.new(0, 6),
+		}),
+	})
+	bar.Parent = box
+	local vp, cam, world = newViewport({ Position = UDim2.fromOffset(6, 36), Size = UDim2.new(1, -12, 1, -70), ZIndex = 42, Active = true })
 	corner(1).Parent = vp
 	vp.Parent = box
-	local title = text({ Position = UDim2.new(0, 10, 1, -30), Size = UDim2.new(1, -130, 0, 26), ZIndex = 42, TextTruncate = Enum.TextTruncate.AtEnd }, 12, "bold", "text")
+	local title = text({ Position = UDim2.new(0, 10, 1, -30), Size = UDim2.new(1, -40, 0, 26), ZIndex = 42, TextTruncate = Enum.TextTruncate.AtEnd }, 12, "bold", "text")
 	title.Parent = box
-	local hint = text({ AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 1, -30), Size = UDim2.new(0, 120, 0, 26), ZIndex = 42, TextXAlignment = Enum.TextXAlignment.Right }, 10, "regular", "dim")
-	hint.Parent = box
+	local grip = new("TextButton", {
+		AnchorPoint = Vector2.new(1, 1),
+		Position = UDim2.new(1, -3, 1, -3),
+		Size = UDim2.fromOffset(18, 18),
+		BackgroundTransparency = 1,
+		Text = "//",
+		ZIndex = 45,
+	})
+	bindText(grip, 11, "bold")
+	bind(grip, "TextColor3", "dim")
+	grip.Parent = box
+
 	local pop = {
-		ctx = ctx, layer = layer, box = box, stroke = st, vp = vp, cam = cam, world = world, title = title, hint = hint,
+		ctx = ctx, layer = layer, box = box, stroke = st, bar = bar, vp = vp, cam = cam, world = world, title = title,
 		open = false, pinned = false, src = nil, radius = 1, yaw = 0, pitch = 0.35, zoom = 1,
-		dragging = false, moved = 0, last = nil, outside = 0,
+		dragging = false, resizing = false, moved = 0, last = nil, outside = 0, openedAt = 0, lockedList = nil,
 	}
-	local function renderHint()
-		hint.Text = pop.pinned and "kept open - click to let go" or "click to keep open"
-		tween(st, { Thickness = pop.pinned and 3 or 2 })
+	local function guardOk()
+		return os.clock() - pop.openedAt >= S.clickGuard / 10
 	end
-	pop.renderHint = renderHint
+	pop.guardOk = guardOk
+
 	vp.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			pop.dragging = true
@@ -1507,10 +1800,6 @@ local function attachPop(ctx)
 	vp.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			pop.dragging = false
-			if pop.moved <= 4 then
-				pop.pinned = not pop.pinned
-				renderHint()
-			end
 		end
 	end)
 	vp.InputChanged:Connect(function(input)
@@ -1526,11 +1815,81 @@ local function attachPop(ctx)
 			orbitCamera(pop)
 		end
 	end)
+
+	-- resize from the corner
+	grip.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			pop.resizing = true
+			pop.resizeStart = ctx.widget:GetRelativeMousePosition()
+			pop.resizeSize = box.AbsoluteSize
+		end
+	end)
+	local function endResize(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 and pop.resizing then
+			pop.resizing = false
+			local sc = S.uiScale / 100
+			save("bigSize", math.clamp(math.floor(box.AbsoluteSize.X / sc / 10 + 0.5) * 10, 140, 700))
+			syncControls(true)
+		end
+	end
+	grip.InputEnded:Connect(endResize)
+	shield.InputEnded:Connect(endResize)
+	vp.InputEnded:Connect(endResize)
+
 	ctx.pop = pop
 	return pop
 end
 
-local function openPop(ctx, t, pin)
+local closePop -- forward
+
+local function rebuildPopBar(pop, t)
+	for _, c in ipairs(pop.bar:GetChildren()) do
+		if c:IsA("GuiObject") then
+			c:Destroy()
+		end
+	end
+	local order = 0
+	for _, a in ipairs(t.actions or {}) do
+		order = order + 1
+		local b = popButton(a.text, a.primary)
+		b.LayoutOrder = order
+		b.Parent = pop.bar
+		b.MouseButton1Click:Connect(function()
+			if not pop.guardOk() then
+				return
+			end
+			if a.closes then
+				closePop(pop.ctx, true)
+			end
+			a.fn()
+		end)
+	end
+	order = order + 1
+	local keep = popButton(pop.pinned and "Kept open" or "Keep open", pop.pinned)
+	keep.LayoutOrder = order
+	keep.Parent = pop.bar
+	keep.MouseButton1Click:Connect(function()
+		if not pop.guardOk() then
+			return
+		end
+		pop.pinned = not pop.pinned
+		keep.Text = pop.pinned and "Kept open" or "Keep open"
+		local r = regOf(keep).props
+		r.BackgroundColor3 = pop.pinned and "accent" or "button"
+		r.TextColor3 = pop.pinned and "accentText" or "buttonText"
+		tween(keep, { BackgroundColor3 = T(r.BackgroundColor3), TextColor3 = T(r.TextColor3) })
+		tween(pop.stroke, { Thickness = pop.pinned and 3 or 2 })
+	end)
+	order = order + 1
+	local x = popButton("X", false)
+	x.LayoutOrder = order
+	x.Parent = pop.bar
+	x.MouseButton1Click:Connect(function()
+		closePop(pop.ctx)
+	end)
+end
+
+local function openPop(ctx, t)
 	local pop = ctx.pop
 	if not pop or not t.holder or not t.vp.Parent then
 		return
@@ -1541,12 +1900,19 @@ local function openPop(ctx, t, pin)
 	pop.radius, pop.yaw, pop.pitch, pop.zoom = t.radius, t.yaw, t.pitch, 1
 	pop.src = t
 	pop.title.Text = t.title or ""
-	pop.pinned = pin and true or false
-	pop.renderHint()
+	pop.pinned = false
+	pop.stroke.Thickness = 2
+	rebuildPopBar(pop, t)
+	if pop.lockedList and pop.lockedList ~= t.list then
+		pop.lockedList.ScrollingEnabled = true
+	end
+	pop.lockedList = t.list
+
 	local lp, ls = pop.layer.AbsolutePosition, pop.layer.AbsoluteSize
 	local sp, ss = t.vp.AbsolutePosition - lp, t.vp.AbsoluteSize
-	local big = math.max(120, math.min(S.bigSize, ls.X - 16, ls.Y - 54))
-	local bw, bh = big, big + 32
+	local sc = S.uiScale / 100
+	local bw = math.clamp(S.bigSize * sc, 160, math.max(160, ls.X - 16))
+	local bh = math.clamp(bw + 70, 200, math.max(200, ls.Y - 16))
 	local tx = math.clamp(sp.X + ss.X / 2 - bw / 2, 8, math.max(8, ls.X - bw - 8))
 	local ty = math.clamp(sp.Y + ss.Y / 2 - bh / 2, 8, math.max(8, ls.Y - bh - 8))
 	if not pop.open then
@@ -1556,12 +1922,13 @@ local function openPop(ctx, t, pin)
 	pop.box.Visible = true
 	pop.open = true
 	pop.outside = 0
+	pop.openedAt = os.clock()
 	setupLighting(pop.vp, pop.cam)
 	orbitCamera(pop)
-	tween(pop.box, { Position = UDim2.fromOffset(tx, ty), Size = UDim2.fromOffset(bw, bh) }, 1.6)
+	tweenFor(pop.box, { Position = UDim2.fromOffset(tx, ty), Size = UDim2.fromOffset(bw, bh) }, expandSeconds())
 end
 
-local function closePop(ctx)
+closePop = function(ctx, instant)
 	local pop = ctx.pop
 	if not pop or not pop.open then
 		return
@@ -1569,6 +1936,10 @@ local function closePop(ctx)
 	pop.open = false
 	pop.pinned = false
 	pop.dragging = false
+	pop.resizing = false
+	if pop.lockedList then
+		pop.lockedList.ScrollingEnabled = true
+	end
 	local t = pop.src
 	local function hide()
 		if not pop.open then
@@ -1576,12 +1947,12 @@ local function closePop(ctx)
 			pop.world:ClearAllChildren()
 		end
 	end
-	if t and t.vp.Parent and t.vp.AbsoluteSize.X > 0 and animTime() > 0 then
+	if not instant and t and t.vp.Parent and t.vp.AbsoluteSize.X > 0 and expandSeconds() > 0 then
 		local sp = t.vp.AbsolutePosition - pop.layer.AbsolutePosition
-		local tw = tween(pop.box, {
+		local tw = tweenFor(pop.box, {
 			Position = UDim2.fromOffset(sp.X, sp.Y),
 			Size = UDim2.fromOffset(t.vp.AbsoluteSize.X, t.vp.AbsoluteSize.Y),
-		}, 1.3)
+		}, expandSeconds() * 0.85)
 		if tw then
 			tw.Completed:Connect(hide)
 		else
@@ -1592,12 +1963,13 @@ local function closePop(ctx)
 	end
 end
 
-local function thumbSetContent(t, instances)
+-- Small previews ----------------------------------------------------------
+local function thumbSetContent(t, instances, reason)
 	t.world:ClearAllChildren()
 	t.holder = nil
 	if not instances or #instances == 0 then
 		t.state = "empty"
-		t.note.Text = "no preview"
+		t.note.Text = "no preview" .. (reason and ("\n" .. tostring(reason)) or "")
 		t.note.Visible = true
 		return
 	end
@@ -1610,9 +1982,10 @@ local function thumbSetContent(t, instances)
 	holder.Parent = t.world
 	t.holder = holder
 	t.state = "ready"
-	t.note.Visible = false
+	local why = invisibleReason(holder)
+	t.note.Text = why or ""
+	t.note.Visible = why ~= nil
 	orbitCamera(t)
-	-- fade in
 	if animTime() > 0 then
 		t.vp.ImageTransparency = 1
 		tween(t.vp, { ImageTransparency = 0 }, 2)
@@ -1625,18 +1998,18 @@ local function makeThumb(list, o)
 	local note = text({ Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, TextWrapped = true, Text = "...", ZIndex = 3 }, 10, "regular", "dim")
 	note.Parent = vp
 	local t = {
-		vp = vp, cam = cam, world = world, note = note, loader = o.loader, title = o.title, ctx = entry.ctx,
-		state = "idle", radius = 1, yaw = math.random() * math.pi * 2, pitch = 0.35, zoom = 1,
-		hovering = false, dragging = false, hoverToken = 0, moved = 0, last = nil,
+		vp = vp, cam = cam, world = world, note = note, loader = o.loader, title = o.title, actions = o.actions,
+		ctx = entry.ctx, list = list, state = "idle", radius = 1, yaw = math.random() * math.pi * 2, pitch = 0.35,
+		zoom = 1, hovering = false, dragging = false, hoverToken = 0, moved = 0, last = nil,
 	}
 	vp.MouseEnter:Connect(function()
 		t.hovering = true
 		t.hoverToken = t.hoverToken + 1
 		local tok = t.hoverToken
-		if S.hoverEnlarge then
+		if S.hoverExpand then
 			task.delay(S.hoverDelay / 10, function()
 				if t.hovering and tok == t.hoverToken and t.holder then
-					openPop(t.ctx, t, false)
+					openPop(t.ctx, t)
 				end
 			end)
 		end
@@ -1657,7 +2030,7 @@ local function makeThumb(list, o)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			t.dragging = false
 			if t.moved <= 4 and t.holder then
-				openPop(t.ctx, t, true)
+				openPop(t.ctx, t) -- click = open the big view
 			end
 		end
 	end)
@@ -1675,7 +2048,7 @@ local function makeThumb(list, o)
 	return t
 end
 
--- Load previews for cards you can see, spin them, and manage the pop-ups
+-- Load visible previews, spin them, manage the big views
 RunService.Heartbeat:Connect(function(dt)
 	local spin = S.spin and dt * (S.spinSpeed / 10) or 0
 	for list, entry in pairs(thumbLists) do
@@ -1691,14 +2064,13 @@ RunService.Heartbeat:Connect(function(dt)
 							t.state = "loading"
 							loadingThumbs = loadingThumbs + 1
 							task.spawn(function()
-								local ok = pcall(t.loader, function(instances)
+								local ok, err = pcall(t.loader, function(instances, reason)
 									if vp.Parent then
-										thumbSetContent(t, instances)
+										thumbSetContent(t, instances, reason)
 									end
 								end)
 								if not ok and t.state == "loading" then
-									t.state = "empty"
-									t.note.Text = "no preview"
+									thumbSetContent(t, nil, err)
 								end
 								loadingThumbs = loadingThumbs - 1
 							end)
@@ -1715,17 +2087,28 @@ RunService.Heartbeat:Connect(function(dt)
 		local pop = ctx.pop
 		if pop and pop.open then
 			if not ctx.widget.Enabled then
-				closePop(ctx)
+				closePop(ctx, true)
 			else
 				local m = ctx.widget:GetRelativeMousePosition()
-				local bp = pop.box.AbsolutePosition - pop.layer.AbsolutePosition
+				local lp = pop.layer.AbsolutePosition
+				local bp = pop.box.AbsolutePosition - lp
 				local bs = pop.box.AbsoluteSize
+				if pop.resizing and pop.resizeStart then
+					local ls = pop.layer.AbsoluteSize
+					local w = math.clamp(pop.resizeSize.X + (m.X - pop.resizeStart.X), 160, math.max(160, ls.X - bp.X - 4))
+					local h = math.clamp(pop.resizeSize.Y + (m.Y - pop.resizeStart.Y), 200, math.max(200, ls.Y - bp.Y - 4))
+					pop.box.Size = UDim2.fromOffset(w, h)
+				end
 				local inside = m.X >= bp.X - 6 and m.X <= bp.X + bs.X + 6 and m.Y >= bp.Y - 6 and m.Y <= bp.Y + bs.Y + 6
-				if inside or pop.pinned or pop.dragging then
+				-- while the mouse is over the big view, the list behind it can't scroll
+				if pop.lockedList then
+					pop.lockedList.ScrollingEnabled = not inside
+				end
+				if inside or pop.pinned or pop.dragging or pop.resizing then
 					pop.outside = 0
 				else
 					pop.outside = pop.outside + dt
-					if pop.outside > 0.2 then
+					if pop.outside > 0.25 then
 						closePop(ctx)
 					end
 				end
@@ -1769,7 +2152,7 @@ local function cardContainer(list, order)
 		})
 		g.Parent = f
 		local function fit()
-			local w = f.AbsoluteSize.X
+			local w = f.AbsoluteSize.X / (S.uiScale / 100)
 			if w <= 0 then
 				return
 			end
@@ -1787,7 +2170,8 @@ local function cardContainer(list, order)
 	return f
 end
 
--- o = { title, lines, selected, onClick, loader, badge, onBadge }
+-- o = { title, lines, selected, onClick, loader, badge, onBadge, actions,
+--       editTitle (text to edit), onRename(newText), onDrag(cardFrame, startPos) }
 local function card(container, list, order, o)
 	local grid = S.layout == "grid"
 	local c = new("TextButton", {
@@ -1814,11 +2198,36 @@ local function card(container, list, order, o)
 		c.Size = UDim2.new(1, 0, 0, listRowHeight())
 	end
 
-	local t = makeThumb(list, { loader = o.loader, title = o.title })
+	local t = makeThumb(list, { loader = o.loader, title = o.title, actions = o.actions })
 	corner(0.75).Parent = t.vp
 	t.vp.Parent = c
 
-	local title = text({ Text = o.title or "", TextTruncate = Enum.TextTruncate.AtEnd }, 13, "bold", "text")
+	local title
+	if o.onRename then
+		-- click the name to rename it
+		title = new("TextBox", {
+			BackgroundTransparency = 1,
+			ClearTextOnFocus = false,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			Text = o.editTitle or o.title or "",
+			ZIndex = 3,
+		})
+		bindText(title, 13, "bold")
+		bind(title, "TextColor3", "text")
+		local line = new("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0), Size = UDim2.new(0, 0, 0, 1), BorderSizePixel = 0 })
+		bind(line, "BackgroundColor3", "accent")
+		line.Parent = title
+		title.Focused:Connect(function()
+			tween(line, { Size = UDim2.new(1, 0, 0, 1) })
+		end)
+		title.FocusLost:Connect(function()
+			tween(line, { Size = UDim2.new(0, 0, 0, 1) })
+			o.onRename(title.Text)
+		end)
+	else
+		title = text({ Text = o.title or "", TextTruncate = Enum.TextTruncate.AtEnd }, 13, "bold", "text")
+	end
 	title.Parent = c
 	local lines = {}
 	if S.showDetails then
@@ -1887,9 +2296,43 @@ local function card(container, list, order, o)
 			tween(c, { BackgroundTransparency = 0 }, 1.5)
 		end)
 	end
-	c.MouseButton1Click:Connect(o.onClick)
+
+	-- dragging the card (Inserter -> workspace)
+	local dragged = false
+	if o.onDrag then
+		local downPos = nil
+		c.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				downPos = input.Position
+				dragged = false
+			end
+		end)
+		c.InputChanged:Connect(function(input)
+			if downPos and input.UserInputType == Enum.UserInputType.MouseMovement then
+				local d = input.Position - downPos
+				if math.abs(d.X) + math.abs(d.Y) > 10 then
+					local p = downPos
+					downPos = nil
+					dragged = true
+					o.onDrag(c, p)
+				end
+			end
+		end)
+		c.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				downPos = nil
+			end
+		end)
+	end
+	c.MouseButton1Click:Connect(function()
+		if dragged then
+			dragged = false
+			return
+		end
+		o.onClick()
+	end)
 	c.Parent = container
-	return { frame = c, paint = paint, thumb = t }
+	return { frame = c, paint = paint, thumb = t, sc = sc }
 end
 
 -- Full-width header row (optionally with a turning arrow)
@@ -1967,6 +2410,7 @@ local summary = dimText("Select a model or part in Explorer.", 1)
 summary.Parent = colPage
 
 local refresh -- forward
+local queueRefresh -- forward
 local refreshInserter -- forward
 local rerenderAll -- forward
 
@@ -1985,7 +2429,7 @@ local collectButton = button("Collect current selection", "secondary", 4)
 collectButton.Visible = not S.live
 collectButton.Parent = colPage
 
-local listHeader = text({ Text = "Meshes (0)", Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 5 }, 13, "bold", "text")
+local listHeader = text({ Text = "Meshes (0)  -  click a card's name to rename it", Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 5, TextTruncate = Enum.TextTruncate.AtEnd }, 13, "bold", "text")
 listHeader.Parent = colPage
 
 local listFrame = scrollList(6)
@@ -1997,13 +2441,19 @@ sendButton.Parent = colPage
 local buildButton = button("Build local copy (real MeshParts, local .mesh)", "secondary", 8)
 buildButton.Parent = colPage
 local saveModelButton = button("Save model", "secondary")
-local pivotButton = button("Apply pivots", "secondary")
-buttonRow(9, { saveModelButton, pivotButton }).Parent = colPage
+local pivotButton = button("Reset pivots", "secondary")
+local restorePivotButton = button("Restore pivots", "secondary")
+buttonRow(9, { saveModelButton, pivotButton, restorePivotButton }).Parent = colPage
+local pivotText = dimText(pivotSummary() .. " Originals are saved - Restore puts them back.", 10, 10)
+pivotText.Parent = colPage
+table.insert(controlRenderers, function()
+	pivotText.Text = pivotSummary() .. " Originals are saved - Restore puts them back."
+end)
 local copyButton = button("Copy list", "secondary")
 local openInserterButton = button("Open Inserter", "secondary")
-buttonRow(10, { copyButton, openInserterButton }).Parent = colPage
+buttonRow(11, { copyButton, openInserterButton }).Parent = colPage
 
-local statusLine = dimText("", 11, 11)
+local statusLine = dimText("", 12, 11)
 statusLine.Parent = colPage
 
 local function setStatus(str, color)
@@ -2065,6 +2515,35 @@ local suppressLiveUntil = 0
 local colSelected = nil
 local colCards = {} -- part -> card
 
+-- Image IDs used by a mesh (TextureID + SurfaceAppearance maps), so the app can save them too
+local function texturesOf(meshInst, owner)
+	local ids, seen = {}, {}
+	local function add(v)
+		local id = idFrom(tostring(v or ""))
+		if id and not seen[id] then
+			seen[id] = true
+			table.insert(ids, id)
+		end
+	end
+	pcall(function()
+		if meshInst:IsA("MeshPart") then
+			add(meshInst.TextureID)
+		elseif meshInst:IsA("FileMesh") then
+			add(meshInst.TextureId)
+		end
+	end)
+	for _, d in ipairs(owner:GetChildren()) do
+		if d:IsA("SurfaceAppearance") then
+			for _, prop in ipairs({ "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap" }) do
+				pcall(function()
+					add(d[prop])
+				end)
+			end
+		end
+	end
+	return ids
+end
+
 local function collect(selected)
 	local entries, seen, models = {}, {}, {}
 	local modelCount = 0
@@ -2084,7 +2563,16 @@ local function collect(selected)
 			models[m] = true
 			modelCount = modelCount + 1
 		end
-		table.insert(entries, { id = id, name = meshBaseName(owner), folder = folderFor(owner), owner = owner, model = m })
+		local auto = meshBaseName(owner)
+		table.insert(entries, {
+			id = id,
+			name = renames[id] or auto,
+			autoName = auto,
+			folder = folderFor(owner),
+			owner = owner,
+			model = m,
+			textures = texturesOf(inst, owner),
+		})
 	end
 	for _, obj in ipairs(selected) do
 		if obj and obj.Parent then
@@ -2142,7 +2630,7 @@ refresh = function()
 	colCards = {}
 	local entries, modelCount = collect(selected)
 	currentEntries = entries
-	listHeader.Text = string.format("Meshes (%d)", #entries)
+	listHeader.Text = string.format("Meshes (%d)  -  click a card's name to rename it", #entries)
 
 	if #selected == 0 then
 		summary.Text = S.live and "Click a model or part in Explorer or the viewport."
@@ -2193,9 +2681,21 @@ refresh = function()
 			end
 			local cd = card(cont, listFrame, i, {
 				title = fileNameOf(e),
+				editTitle = e.name,
+				onRename = function(newName)
+					newName = clean(newName)
+					if newName == "" or newName == e.autoName then
+						renames[e.id] = nil
+					else
+						renames[e.id] = newName
+					end
+					saveRenames()
+					e.name = renames[e.id] or e.autoName
+					queueRefresh()
+				end,
 				lines = {
-					e.id .. "  -  " .. e.owner.ClassName,
-					partSizeText(e.owner) .. (e.folder and ("  ->  " .. e.folder .. "/") or ""),
+					fileNameOf(e),
+					e.id .. "  -  " .. partSizeText(e.owner) .. (e.folder and ("  ->  " .. e.folder .. "/") or ""),
 				},
 				selected = (colSelected == e.owner),
 				onClick = function()
@@ -2205,7 +2705,11 @@ refresh = function()
 					local ok, c = pcall(function()
 						return e.owner:Clone()
 					end)
-					cb((ok and c) and { c } or nil)
+					if ok and c then
+						cb({ c })
+					else
+						cb(nil, ok and "can't be copied (Archivable off)" or tostring(c))
+					end
 				end,
 			})
 			colCards[e.owner] = cd
@@ -2219,7 +2723,7 @@ refresh = function()
 end
 
 local refreshQueued = false
-local function queueRefresh()
+queueRefresh = function()
 	if refreshQueued then
 		return
 	end
@@ -2249,14 +2753,41 @@ sendButton.MouseButton1Click:Connect(function()
 	end
 	local items = {}
 	for _, e in ipairs(currentEntries) do
-		table.insert(items, { id = e.id, name = e.name, folder = e.folder, noId = not S.addId })
+		table.insert(items, { id = e.id, name = e.name, folder = e.folder, noId = not S.addId, textures = e.textures })
 	end
 	setStatus("Sending...", nil)
 	local ok = request("POST", "/queue", HttpService:JSONEncode({ autoStart = S.autoStart, items = items }))
 	setLink(ok)
 	if ok then
 		local verb = S.autoStart and "Downloading" or "Queued"
-		setStatus(string.format("%s %d mesh(es) in Mesh Downloader.", verb, #items), GREEN)
+		setStatus(string.format("%s %d mesh(es) + their textures in Mesh Downloader. Saving their looks...", verb, #items), GREEN)
+		-- save each mesh's "look" (texture, SurfaceAppearance, colour, material) so the
+		-- Inserter can give a lone mesh its real appearance later
+		local entries = currentEntries
+		task.spawn(function()
+			local saved = 0
+			for i, e in ipairs(entries) do
+				if i > 300 then
+					break
+				end
+				local ok, c = pcall(function()
+					return e.owner:Clone()
+				end)
+				if ok and c then
+					stripScripts(c)
+					for _, d in ipairs(c:GetChildren()) do
+						if not (d:IsA("SurfaceAppearance") or d:IsA("Decal") or d:IsA("Texture") or d:IsA("FileMesh") or d:IsA("WrapLayer") or d:IsA("WrapTarget")) then
+							d:Destroy()
+						end
+					end
+					if saveToApp({ c }, e.id, "look", nil) then
+						saved = saved + 1
+					end
+					c:Destroy()
+				end
+			end
+			setStatus(string.format("%s %d mesh(es) + textures. Saved %d look(s) for the Inserter.", verb, #items, saved), GREEN)
+		end)
 	else
 		setStatus("Couldn't reach Mesh Downloader. Make sure it's open with 'Listen for Studio plugin' on.", RED)
 	end
@@ -2324,14 +2855,26 @@ pivotButton.MouseButton1Click:Connect(function()
 		setStatus("Select a model or part first.", RED)
 		return
 	end
-	if S.modelPivot == "keep" and not S.partPivots then
-		setStatus("Pick Middle or Average under Model pivot (or turn on 'Center each part's pivot') first.", RED)
+	local finish = beginRecording("Reset pivots")
+	local n = resetPivots(roots)
+	finish(true)
+	setStatus(string.format("Reset %d pivot(s). %s", n, pivotSummary()), GREEN)
+end)
+
+restorePivotButton.MouseButton1Click:Connect(function()
+	local roots = selectionRoots()
+	if #roots == 0 then
+		setStatus("Select a model or part first.", RED)
 		return
 	end
-	local finish = beginRecording("Apply pivots")
-	applyPivots(roots)
+	local finish = beginRecording("Restore pivots")
+	local n = restorePivots(roots)
 	finish(true)
-	setStatus(string.format("Pivots updated on %d object(s).", #roots), GREEN)
+	if n == 0 then
+		setStatus("Nothing to restore - these pivots were never reset by Mesh Tools.", nil)
+	else
+		setStatus(string.format("Restored %d original pivot(s).", n), GREEN)
+	end
 end)
 
 -- Build local copy ----------------------------------------------------
@@ -2497,6 +3040,32 @@ local function buildLocal()
 		setStatus("Couldn't copy the selection (it may not be copyable).", RED)
 		return
 	end
+	-- use downloaded textures too, when Mesh Downloader has them
+	local texMap = type(data.textures) == "table" and data.textures or {}
+	local function swapTex(v)
+		local tid = idFrom(tostring(v or ""))
+		local f = tid and texMap[tid]
+		return f and (LOCAL_PREFIX .. "textures/" .. f) or nil
+	end
+	for _, root in ipairs(copies) do
+		local list = root:GetDescendants()
+		table.insert(list, root)
+		for _, d in ipairs(list) do
+			pcall(function()
+				if d:IsA("MeshPart") then
+					local l = swapTex(d.TextureID)
+					if l then
+						d.TextureID = l
+					end
+				elseif d:IsA("FileMesh") then
+					local l = swapTex(d.TextureId)
+					if l then
+						d.TextureId = l
+					end
+				end
+			end)
+		end
+	end
 	applyPivots(copies)
 	finish(true)
 	Selection:Set(copies)
@@ -2538,6 +3107,18 @@ refreshLibButton.Size = UDim2.new(0, 80, 1, 0)
 refreshLibButton.LayoutOrder = 2
 refreshLibButton.Parent = searchRow
 searchRow.Parent = insPage
+
+local pivotRow = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = 3 })
+text({ Text = "When inserting:", Size = UDim2.new(0, 104, 1, 0) }, 11, "regular", "dim").Parent = pivotRow
+local pivotSeg = segmented(1, {
+	{ key = false, text = "Keep pivots" },
+	{ key = true, text = "Reset pivots" },
+}, "pivotOnInsert", nil, 11)
+pivotSeg.Position = UDim2.fromOffset(106, 0)
+pivotSeg.Size = UDim2.new(1, -106, 1, 0)
+pivotSeg.Parent = pivotRow
+pivotRow.Parent = insPage
+dimText("Click a preview for the big view. Drag a card into the 3D view to place it.", 3, 10).Parent = insPage
 
 local insList = scrollList(4)
 insList.Parent = insPage
@@ -2586,6 +3167,7 @@ end
 
 local function applyInfoPos()
 	infoBlock.LayoutOrder = (S.infoPos == "top") and 2 or 5
+	pivotRow.LayoutOrder = 3
 end
 applyInfoPos()
 
@@ -2598,7 +3180,7 @@ local function setInfo(str)
 end
 
 -- Library state ------------------------------------------------------------
-local lib = { meshes = {}, models = {}, loaded = false }
+local lib = { meshes = {}, models = {}, textures = {}, loaded = false }
 local sectionOpen = { models = true, meshes = true }
 local expanded = {}
 local modelCache = {}
@@ -2630,16 +3212,106 @@ local function escapeRich(s)
 	return s
 end
 
-local function getMeshTemplate(id)
+-- Downloads a file from the app in base64 chunks and opens it as instances
+local function fetchRoots(path)
+	if not SerializationService then
+		return nil, "this Studio can't load model files from plugins"
+	end
+	local chunks, count, i = {}, 1, 0
+	while i < count do
+		local sep = string.find(path, "?", 1, true) and "&" or "?"
+		local ok, res = request("GET", path .. sep .. "chunk=" .. i)
+		local dd = ok and decodeBody(res)
+		if not dd or not dd.ok then
+			return nil, "couldn't load it from Mesh Downloader"
+		end
+		count = tonumber(dd.count) or 1
+		table.insert(chunks, b64decode(dd.data or ""))
+		i = i + 1
+	end
+	local total = 0
+	for _, b in ipairs(chunks) do
+		total = total + buffer.len(b)
+	end
+	local all = buffer.create(total)
+	local o = 0
+	for _, b in ipairs(chunks) do
+		buffer.copy(all, o, b, 0, buffer.len(b))
+		o = o + buffer.len(b)
+	end
+	return deserialize(all)
+end
+
+-- Swap image IDs for downloaded local copies (rbxasset://meshtools/textures/...)
+local function localTex(v)
+	local id = idFrom(tostring(v or ""))
+	local f = id and lib.textures and lib.textures[id]
+	if f then
+		return LOCAL_PREFIX .. "textures/" .. f
+	end
+	return nil
+end
+
+local function applyLocalTextures(root)
+	local list = root:GetDescendants()
+	table.insert(list, root)
+	for _, d in ipairs(list) do
+		if d:IsA("MeshPart") then
+			local l = localTex(d.TextureID)
+			if l then
+				pcall(function()
+					d.TextureID = l
+				end)
+			end
+		elseif d:IsA("FileMesh") then
+			local l = localTex(d.TextureId)
+			if l then
+				pcall(function()
+					d.TextureId = l
+				end)
+			end
+		elseif d:IsA("SurfaceAppearance") then
+			for _, prop in ipairs({ "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap" }) do
+				pcall(function()
+					local l = localTex(d[prop])
+					if l then
+						d[prop] = l
+					end
+				end)
+			end
+		end
+	end
+end
+
+-- A ready-to-insert MeshPart for a library mesh: uses its saved "look"
+-- (texture / SurfaceAppearance / colour) when there is one.
+local function getMeshTemplate(m)
+	local id = m.id
 	if meshTemplates[id] then
 		return meshTemplates[id]
 	end
-	local p, err = createLocalMeshPart(id, nil)
-	if p then
-		p.Anchored = true
-		meshTemplates[id] = p
+	local part, err = nil, nil
+	if m.look then
+		local roots = fetchRoots("/look?id=" .. id)
+		local look = roots and roots[1]
+		if look and look:IsA("MeshPart") then
+			part, err = convertMeshPart(look, id)
+		elseif look and look:IsA("BasePart") then
+			local sm = look:FindFirstChildWhichIsA("FileMesh")
+			if sm then
+				part, err = convertSpecialMesh(look, sm, id)
+			end
+		end
 	end
-	return p, err
+	if not part then
+		part, err = createLocalMeshPart(id, nil)
+	end
+	if part then
+		part.Anchored = true
+		applyLocalTextures(part)
+		meshTemplates[id] = part
+	end
+	return part, err
 end
 
 local function scanModelParts(roots)
@@ -2811,6 +3483,21 @@ local function showPartInfo(m, p)
 end
 
 
+-- Model inspector: a big 3D view of an expanded model. Click a part in it
+-- to find (and select) its mesh card; clicking a card highlights the part.
+local inspector = nil
+
+local function inspectorHighlight(p)
+	if not inspector then
+		return
+	end
+	for orig, cl in pairs(inspector.map) do
+		local base = inspector.baseT[cl] or 0
+		local target = (p == nil or p.inst == orig) and base or math.max(base, 0.88)
+		tween(cl, { Transparency = target }, 0.8)
+	end
+end
+
 local function updateInsHighlights()
 	local key = selected and (selected.kind == "part" and selected.part or selected.item) or nil
 	for k, cd in pairs(insCards) do
@@ -2818,11 +3505,20 @@ local function updateInsHighlights()
 	end
 end
 
+local function scrollToCard(cd)
+	if not cd or not cd.frame.Parent then
+		return
+	end
+	local y = cd.frame.AbsolutePosition.Y - insList.AbsolutePosition.Y + insList.CanvasPosition.Y - 40
+	tween(insList, { CanvasPosition = Vector2.new(0, math.max(0, y)) }, 1.5)
+end
+
 local function selectMesh(m)
 	selectToken = selectToken + 1
 	selected = { kind = "mesh", item = m }
 	showMeshInfo(m)
 	updateInsHighlights()
+	inspectorHighlight(nil)
 end
 
 local function selectModel(m)
@@ -2831,6 +3527,7 @@ local function selectModel(m)
 	selected = { kind = "model", item = m }
 	showModelInfo(m, modelCache[m.key])
 	updateInsHighlights()
+	inspectorHighlight(nil)
 	loadModel(m, function(entry)
 		if token == selectToken then
 			showModelInfo(m, entry)
@@ -2838,11 +3535,15 @@ local function selectModel(m)
 	end)
 end
 
-local function selectPart(m, p)
+local function selectPart(m, p, fromInspector)
 	selectToken = selectToken + 1
 	selected = { kind = "part", item = m, part = p }
 	showPartInfo(m, p)
 	updateInsHighlights()
+	inspectorHighlight(p)
+	if fromInspector then
+		scrollToCard(insCards[p])
+	end
 end
 
 local function matches(str, filter)
@@ -2852,14 +3553,115 @@ local function matches(str, filter)
 	return string.find(string.lower(tostring(str or "")), filter, 1, true) ~= nil
 end
 
+local function buildInspector(m, cache, order)
+	local frame = new("Frame", { Size = UDim2.new(1, 0, 0, 250), LayoutOrder = order }, { corner(1) })
+	bind(frame, "BackgroundColor3", "panel")
+	stroke().Parent = frame
+	local vp, cam, world = newViewport({ Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 1, -30), Active = true, ZIndex = 2 })
+	corner(1).Parent = vp
+	vp.Parent = frame
+	text({ Position = UDim2.new(0, 10, 1, -22), Size = UDim2.new(1, -20, 0, 18), Text = "Click a part to find its mesh  -  drag to rotate  -  scroll to zoom", TextTruncate = Enum.TextTruncate.AtEnd }, 10, "regular", "dim").Parent = frame
+
+	local holder = Instance.new("Model")
+	local map, back, baseT = {}, {}, {}
+	for _, r in ipairs(cache.roots) do
+		local ok, c = pcall(function()
+			return r:Clone()
+		end)
+		if ok and c then
+			local o = r:GetDescendants()
+			table.insert(o, 1, r)
+			local cl = c:GetDescendants()
+			table.insert(cl, 1, c)
+			if #o == #cl then
+				for i = 1, #o do
+					if o[i]:IsA("BasePart") then
+						map[o[i]] = cl[i]
+					end
+				end
+			end
+			c.Parent = holder
+		end
+	end
+	stripScripts(holder)
+	for _, cl in pairs(map) do
+		baseT[cl] = cl.Transparency
+	end
+	for _, p in ipairs(cache.parts or {}) do
+		local cl = map[p.inst]
+		if cl then
+			back[cl] = p
+		end
+	end
+	local insp = { vp = vp, cam = cam, world = world, map = map, back = back, baseT = baseT, radius = 2, yaw = 0.6, pitch = 0.35, zoom = 1 }
+	frameContent(insp, holder)
+	holder.Parent = world
+	orbitCamera(insp)
+
+	local dragging, moved, last = false, 0, nil
+	vp.MouseEnter:Connect(function()
+		insList.ScrollingEnabled = false -- scroll = zoom while over the inspector
+	end)
+	vp.MouseLeave:Connect(function()
+		insList.ScrollingEnabled = true
+		dragging = false
+	end)
+	vp.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging, moved, last = true, 0, input.Position
+		end
+	end)
+	vp.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement and dragging and last then
+			local d = input.Position - last
+			last = input.Position
+			moved = moved + math.abs(d.X) + math.abs(d.Y)
+			insp.yaw = insp.yaw - d.X * 0.012
+			insp.pitch = math.clamp(insp.pitch + d.Y * 0.012, -1.45, 1.45)
+			orbitCamera(insp)
+		elseif input.UserInputType == Enum.UserInputType.MouseWheel then
+			insp.zoom = math.clamp(insp.zoom * (1 - input.Position.Z * 0.12), 0.1, 6)
+			orbitCamera(insp)
+		end
+	end)
+	vp.InputEnded:Connect(function(input)
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+			return
+		end
+		dragging = false
+		if moved > 4 then
+			return
+		end
+		-- click: find the part under the mouse
+		local sz = vp.AbsoluteSize
+		local rx = (input.Position.X - vp.AbsolutePosition.X) / math.max(sz.X, 1)
+		local ry = (input.Position.Y - vp.AbsolutePosition.Y) / math.max(sz.Y, 1)
+		local tanY = math.tan(math.rad(cam.FieldOfView) / 2)
+		local aspect = sz.X / math.max(sz.Y, 1)
+		local dir = cam.CFrame:VectorToWorldSpace(Vector3.new((rx * 2 - 1) * tanY * aspect, (1 - ry * 2) * tanY, -1)).Unit
+		local result = world:Raycast(cam.CFrame.Position, dir * 10000)
+		local p = result and back[result.Instance]
+		if p then
+			selectPart(m, p, true)
+		end
+	end)
+	inspector = insp
+	frame.Parent = insList
+end
+
+local startCardDrag -- forward (drag into the 3D view)
+local insertTarget -- forward
+
 renderInserter = function()
 	if not ins.widget.Enabled then
 		return
 	end
-	closePop(ins)
+	closePop(ins, true)
 	clearRows(insList)
 	resetThumbs(insList)
 	insCards = {}
+	inspector = nil
+	insList.ScrollingEnabled = true
 	local filter = string.lower(clean(searchBox.Text))
 	local order = 0
 	local function nextOrder()
@@ -2870,6 +3672,18 @@ renderInserter = function()
 	if not lib.loaded then
 		makeNote(insList, "Open Mesh Downloader, then press Refresh.", nextOrder())
 		return
+	end
+
+	local function expandModel(m)
+		local open = not expanded[m.key]
+		expanded = {}
+		if open then
+			expanded[m.key] = true
+			loadModel(m, function()
+				renderInserter()
+			end)
+		end
+		renderInserter()
 	end
 
 	-- MODELS -------------------------------------------------------------
@@ -2903,12 +3717,13 @@ renderInserter = function()
 					break
 				end
 				local cache = modelCache[m.key]
-				local detail = "press + to see its meshes"
+				local detail = "press + to inspect its meshes"
 				if cache and cache.roots then
 					detail = string.format("%d parts  -  %d meshes", cache.partCount or 0, #(cache.parts or {}))
 				elseif cache and cache.err then
 					detail = "can't preview (see details)"
 				end
+				local target = { kind = "model", item = m }
 				local cd = card(cont, insList, i, {
 					title = m.name,
 					lines = { fmtBytes(m.bytes) .. "  -  " .. (m.date or ""), detail },
@@ -2921,60 +3736,77 @@ renderInserter = function()
 						if entry and entry.roots then
 							cb(cloneAll(entry.roots))
 						else
-							cb(nil)
+							cb(nil, entry and entry.err)
 						end
 					end,
 					badge = expanded[m.key] and "-" or "+",
 					onBadge = function()
-						expanded[m.key] = not expanded[m.key]
-						if expanded[m.key] then
-							loadModel(m, function()
-								renderInserter()
-							end)
-						end
-						renderInserter()
+						expandModel(m)
+					end,
+					actions = {
+						{ text = "Insert", primary = true, closes = true, fn = function()
+							insertTarget(target)
+						end },
+						{ text = expanded[m.key] and "Hide meshes" or "Show meshes", closes = true, fn = function()
+							expandModel(m)
+						end },
+					},
+					onDrag = function(frame)
+						startCardDrag(ins, frame, target, m.name)
 					end,
 				})
 				insCards[m] = cd
 			end
 		end
 
-		-- expanded models: their meshes
+		-- the expanded model: inspector + its mesh cards
 		for _, m in ipairs(models) do
 			if expanded[m.key] then
 				local cache = modelCache[m.key]
 				local count = (cache and cache.parts) and #cache.parts or 0
-				groupHeader(insList, nextOrder(), string.format("%s  -  meshes (%d)   [click to close]", m.name, count), function()
-					expanded[m.key] = nil
+				groupHeader(insList, nextOrder(), string.format("%s  -  %d meshes   (click to close)", m.name, count), function()
+					expanded = {}
 					renderInserter()
 				end)
 				if not cache or cache.loading then
 					makeNote(insList, "Loading...", nextOrder())
 				elseif cache.err then
 					makeNote(insList, cache.err, nextOrder())
-				elseif #cache.parts == 0 then
-					makeNote(insList, "No meshes in this model.", nextOrder())
 				else
-					local cont = cardContainer(insList, nextOrder())
-					local shown = 0
-					for _, p in ipairs(cache.parts) do
-						if filter == "" or matches(m.name, filter) or matches(p.name, filter) or matches(p.id, filter) then
-							shown = shown + 1
-							if shown > S.maxItems then
-								break
+					buildInspector(m, cache, nextOrder())
+					if #cache.parts == 0 then
+						makeNote(insList, "No meshes in this model.", nextOrder())
+					else
+						local cont = cardContainer(insList, nextOrder())
+						local shown = 0
+						for _, p in ipairs(cache.parts) do
+							if filter == "" or matches(m.name, filter) or matches(p.name, filter) or matches(p.id, filter) then
+								shown = shown + 1
+								if shown > S.maxItems then
+									break
+								end
+								local target = { kind = "part", item = m, part = p }
+								local cd = card(cont, insList, shown, {
+									title = p.name,
+									lines = { p.id .. "  -  " .. p.inst.ClassName, p.path },
+									selected = selected and selected.kind == "part" and selected.part == p,
+									onClick = function()
+										selectPart(m, p)
+									end,
+									loader = function(cb)
+										cb(cloneAll({ p.inst }))
+									end,
+									actions = {
+										{ text = "Insert", primary = true, closes = true, fn = function()
+											insertTarget(target)
+										end },
+									},
+									onDrag = function(frame)
+										startCardDrag(ins, frame, target, p.name)
+									end,
+								})
+								insCards[p] = cd
 							end
-							local cd = card(cont, insList, shown, {
-								title = p.name,
-								lines = { p.id .. "  -  " .. p.inst.ClassName, p.path },
-								selected = selected and selected.kind == "part" and selected.part == p,
-								onClick = function()
-									selectPart(m, p)
-								end,
-								loader = function(cb)
-									cb(cloneAll({ p.inst }))
-								end,
-							})
-							insCards[p] = cd
 						end
 					end
 				end
@@ -3004,10 +3836,11 @@ renderInserter = function()
 					break
 				end
 				local bones = tonumber(m.bones) or 0
+				local target = { kind = "mesh", item = m }
 				local cd = card(cont, insList, i, {
 					title = m.name,
 					lines = {
-						m.id .. "  -  " .. tostring(m.tris or "?") .. " tris" .. (bones ~= 0 and "  -  skinned" or ""),
+						m.id .. "  -  " .. tostring(m.tris or "?") .. " tris" .. (bones ~= 0 and "  -  skinned" or "") .. (m.look and "  -  textured" or ""),
 						fmtSize(m.size) .. " studs  -  " .. fmtBytes(m.bytes),
 					},
 					selected = selected and selected.kind == "mesh" and selected.item == m,
@@ -3015,8 +3848,20 @@ renderInserter = function()
 						selectMesh(m)
 					end,
 					loader = function(cb)
-						local tpl = getMeshTemplate(m.id)
-						cb(tpl and { tpl:Clone() } or nil)
+						local tpl, err = getMeshTemplate(m)
+						if tpl then
+							cb({ tpl:Clone() })
+						else
+							cb(nil, err)
+						end
+					end,
+					actions = {
+						{ text = "Insert", primary = true, closes = true, fn = function()
+							insertTarget(target)
+						end },
+					},
+					onDrag = function(frame)
+						startCardDrag(ins, frame, target, m.name)
 					end,
 				})
 				insCards[m] = cd
@@ -3042,9 +3887,11 @@ refreshInserter = function()
 		end
 		lib.meshes = d.meshes or {}
 		lib.models = d.models or {}
+		lib.textures = d.textures or {}
 		table.sort(lib.meshes, byName)
 		table.sort(lib.models, byName)
 		lib.loaded = true
+		meshTemplates = {} -- looks / textures may have changed
 		if selected then
 			local list = selected.kind == "mesh" and lib.meshes or lib.models
 			local keyName = selected.kind == "mesh" and "id" or "key"
@@ -3080,6 +3927,42 @@ searchBox:GetPropertyChangedSignal("Text"):Connect(function()
 end)
 refreshLibButton.MouseButton1Click:Connect(refreshInserter)
 
+-- Inserting -----------------------------------------------------------------
+-- What to insert for a mesh / part / model
+local function instancesFor(target)
+	if target.kind == "mesh" then
+		local m = target.item
+		local tpl, err = getMeshTemplate(m)
+		if not tpl then
+			return nil, "Couldn't create the mesh: " .. tostring(err)
+		end
+		local p = tpl:Clone()
+		p.Name = m.name
+		return { p }, m.name
+	elseif target.kind == "part" then
+		local clones = cloneAll({ target.part.inst })
+		if #clones == 0 then
+			return nil, "Couldn't copy that part."
+		end
+		applyLocalTextures(clones[1])
+		return clones, target.part.name
+	end
+	local m = target.item
+	local entry = modelCache[m.key]
+	if not entry or entry.loading then
+		entry = waitModel(m)
+	end
+	if not entry or entry.err or not entry.roots then
+		return nil, (entry and entry.err) or "This model couldn't be loaded."
+	end
+	local clones = cloneAll(entry.roots)
+	for _, c in ipairs(clones) do
+		applyLocalTextures(c)
+	end
+	return clones, m.name
+end
+
+-- in front of the camera
 local function insertInstances(instances, label_)
 	local finish = beginRecording("Insert " .. label_)
 	local holder = Instance.new("Model")
@@ -3106,51 +3989,27 @@ local function insertInstances(instances, label_)
 	finish(true)
 end
 
-insertButton.MouseButton1Click:Connect(function()
-	if not selected then
-		setInsStatus("Pick a mesh or model first (click its name).", RED)
+insertTarget = function(target)
+	local instances, labelOrErr = instancesFor(target)
+	if not instances then
+		setInsStatus(labelOrErr, RED)
 		return
 	end
-	if selected.kind == "mesh" then
-		local m = selected.item
-		local tpl, err = getMeshTemplate(m.id)
-		if not tpl then
-			setInsStatus("Couldn't create the mesh: " .. tostring(err), RED)
-			return
-		end
-		local p = tpl:Clone()
-		p.Name = m.name
-		insertInstances({ p }, m.name)
-		setInsStatus("Inserted " .. m.name .. " (loads from your PC: rbxasset://meshtools/" .. m.id .. ".mesh).", GREEN)
-	elseif selected.kind == "part" then
-		local p = selected.part
-		local clones = cloneAll({ p.inst })
-		if #clones == 0 then
-			setInsStatus("Couldn't copy that part.", RED)
-			return
-		end
-		insertInstances(clones, p.name)
-		setInsStatus("Inserted " .. p.name .. ".", GREEN)
-	else
-		local m = selected.item
-		local entry = modelCache[m.key]
-		if not entry or entry.loading then
-			setInsStatus("Still loading - try again in a second.", nil)
-			return
-		end
-		if entry.err or not entry.roots then
-			setInsStatus(entry.err or "This model couldn't be loaded.", RED)
-			return
-		end
-		local clones = cloneAll(entry.roots)
-		insertInstances(clones, m.name)
-		setInsStatus(string.format("Inserted %s (%d object(s), folders and models kept).", m.name, #clones), GREEN)
+	insertInstances(instances, labelOrErr)
+	setInsStatus("Inserted " .. labelOrErr .. ".", GREEN)
+end
+
+insertButton.MouseButton1Click:Connect(function()
+	if not selected then
+		setInsStatus("Pick a mesh or model first (click its card).", RED)
+		return
 	end
+	insertTarget(selected)
 end)
 
 revealButton.MouseButton1Click:Connect(function()
 	if not selected then
-		setInsStatus("Pick a mesh or model first (click its name).", RED)
+		setInsStatus("Pick a mesh or model first (click its card).", RED)
 		return
 	end
 	local path
@@ -3163,6 +4022,199 @@ revealButton.MouseButton1Click:Connect(function()
 	if not ok then
 		setInsStatus("Couldn't open the folder - is Mesh Downloader open?", RED)
 	end
+end)
+
+-- Drag a card into the 3D view ------------------------------------------------
+-- The card lifts out and follows the mouse; once the mouse leaves the window it
+-- flies back into place and the object appears under your cursor in the 3D
+-- view. Let go (or click) to place it, right-click to cancel.
+local pluginMouse = plugin:GetMouse()
+local placing = nil
+local ghost = nil
+
+local function stopPlacing(commit)
+	local p = placing
+	if not p then
+		return
+	end
+	placing = nil
+	for _, c in ipairs(p.conns) do
+		c:Disconnect()
+	end
+	pcall(function()
+		plugin:Deactivate()
+	end)
+	if commit and p.holder.Parent then
+		for _, inst in ipairs(p.instances) do
+			inst.Parent = workspace
+		end
+		p.holder:Destroy()
+		applyPivots(p.instances)
+		Selection:Set(p.instances)
+		p.finish(true)
+		setInsStatus("Placed " .. p.label .. ".", GREEN)
+	else
+		pcall(function()
+			p.holder:Destroy()
+		end)
+		p.finish(false)
+		setInsStatus("Cancelled.", nil)
+	end
+end
+
+local function startPlacing(target)
+	if placing then
+		stopPlacing(false)
+	end
+	local instances, labelOrErr = instancesFor(target)
+	if not instances then
+		setInsStatus(labelOrErr, RED)
+		return
+	end
+	local finish = beginRecording("Drag in " .. labelOrErr)
+	local holder = Instance.new("Model")
+	holder.Name = "_MeshInserterPlacing"
+	for _, inst in ipairs(instances) do
+		inst.Parent = holder
+	end
+	holder.Parent = workspace
+	local ok, _, size = pcall(function()
+		return holder:GetBoundingBox()
+	end)
+	local p = {
+		holder = holder, instances = instances, label = labelOrErr, finish = finish, conns = {},
+		height = (ok and size) and size.Y or 2, startedAt = os.clock(),
+	}
+	placing = p
+	pluginMouse.TargetFilter = holder
+	pcall(function()
+		plugin:Activate(true)
+	end)
+	local function follow()
+		if placing ~= p then
+			return
+		end
+		local hit = pluginMouse.Hit
+		if hit then
+			local okb, cf2 = pcall(function()
+				return holder:GetBoundingBox()
+			end)
+			if okb then
+				holder:TranslateBy((hit.Position + Vector3.new(0, p.height / 2, 0)) - cf2.Position)
+			end
+		end
+	end
+	table.insert(p.conns, RunService.Heartbeat:Connect(follow))
+	table.insert(p.conns, pluginMouse.Button1Up:Connect(function()
+		if os.clock() - p.startedAt > 0.15 then
+			stopPlacing(true)
+		end
+	end))
+	table.insert(p.conns, pluginMouse.Button1Down:Connect(function()
+		stopPlacing(true)
+	end))
+	table.insert(p.conns, pluginMouse.Button2Down:Connect(function()
+		stopPlacing(false)
+	end))
+	table.insert(p.conns, plugin.Deactivation:Connect(function()
+		if placing == p then
+			stopPlacing(true)
+		end
+	end))
+	follow()
+	setInsStatus("Let go (or click) in the 3D view to place " .. labelOrErr .. ". Right-click cancels.", nil)
+end
+
+local function returnGhost()
+	local gh = ghost
+	if not gh then
+		return
+	end
+	ghost = nil
+	pcall(function()
+		gh.catcher:Destroy()
+	end)
+	local home = gh.home
+	if gh.card.Parent then
+		home = gh.card.AbsolutePosition - gh.layer.AbsolutePosition
+	end
+	tween(gh.cardScale, { Scale = 1 }, 1.2)
+	local tw = tween(gh.frame, {
+		Position = UDim2.fromOffset(home.X, home.Y),
+		Size = UDim2.fromOffset(gh.homeSize.X, gh.homeSize.Y),
+		BackgroundTransparency = 0.7,
+	}, 1.4)
+	if tw then
+		tw.Completed:Connect(function()
+			gh.frame:Destroy()
+		end)
+	else
+		gh.frame:Destroy()
+	end
+end
+
+local function leaveWindow()
+	if ghost and not ghost.left then
+		ghost.left = true
+		local target = ghost.target
+		returnGhost()
+		task.spawn(startPlacing, target)
+	end
+end
+
+startCardDrag = function(ctx, cardFrame, target, label_)
+	if ghost then
+		return
+	end
+	closePop(ctx, true)
+	local layer = ctx.pop.layer
+	local home = cardFrame.AbsolutePosition - layer.AbsolutePosition
+	local size = cardFrame.AbsoluteSize
+	local g = new("Frame", { Position = UDim2.fromOffset(home.X, home.Y), Size = UDim2.fromOffset(size.X, size.Y), ZIndex = 60 }, { corner(1) })
+	bind(g, "BackgroundColor3", "card")
+	local st = new("UIStroke", { Thickness = 2 })
+	bind(st, "Color", "accent")
+	st.Parent = g
+	text({ Text = label_, Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 0, 18), ZIndex = 61, TextTruncate = Enum.TextTruncate.AtEnd }, 12, "bold", "text").Parent = g
+	text({ Text = "drag into the 3D view", Position = UDim2.fromOffset(8, 24), Size = UDim2.new(1, -16, 0, 14), ZIndex = 61, TextTruncate = Enum.TextTruncate.AtEnd }, 10, "regular", "dim").Parent = g
+	g.Parent = layer
+	-- covers the window while dragging: catches "let go inside the window" and "left the window"
+	local catcher = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "", ZIndex = 59 })
+	catcher.Parent = layer
+	local cardScale = cardFrame:FindFirstChildOfClass("UIScale") or Instance.new("UIScale", cardFrame)
+	tween(cardScale, { Scale = 0.9 }, 1)
+	ghost = {
+		frame = g, catcher = catcher, layer = layer, ctx = ctx, home = home, homeSize = size, target = target,
+		card = cardFrame, cardScale = cardScale, left = false, pos = Vector2.new(home.X, home.Y),
+	}
+	tween(g, { Size = UDim2.fromOffset(math.max(120, size.X * 0.75), 44) }, 1)
+	catcher.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 and ghost and not ghost.left then
+			returnGhost() -- let go inside the window: put it back
+		end
+	end)
+	catcher.MouseButton1Down:Connect(function()
+		if ghost and not ghost.left then
+			returnGhost()
+		end
+	end)
+	catcher.MouseLeave:Connect(leaveWindow)
+end
+
+RunService.Heartbeat:Connect(function()
+	local gh = ghost
+	if not gh or gh.left then
+		return
+	end
+	local m = gh.ctx.widget:GetRelativeMousePosition()
+	local ls = gh.layer.AbsoluteSize
+	if m.X < 0 or m.Y < 0 or m.X > ls.X or m.Y > ls.Y then
+		leaveWindow()
+		return
+	end
+	local target = Vector2.new(m.X - 20, m.Y - 18)
+	gh.pos = gh.pos:Lerp(target, 0.35)
+	gh.frame.Position = UDim2.fromOffset(gh.pos.X, gh.pos.Y)
 end)
 
 -- =================================================================
@@ -3178,6 +4230,12 @@ end
 local customBoxes = {}
 local function px(v)
 	return v .. " px"
+end
+local function pct(v)
+	return v .. "%"
+end
+local function secs(v)
+	return string.format("%.1f s", v / 10)
 end
 
 local NAME_OPTIONS = {
@@ -3217,6 +4275,16 @@ local function buildSettingsPage(ctx)
 		rerenderAll()
 	end
 
+	add(sectionTitle("Size", nx()))
+	add(slider("UI scale (whole window)", "uiScale", nx(), 60, 160, 5, pct, function()
+		applyUiScale()
+		task.delay(animTime(1.3), rerenderAll)
+	end))
+	add(slider("Text size", "textScale", nx(), 70, 150, 5, pct, appearance))
+	add(slider("Card / preview size", "cardSize", nx(), 56, 220, 4, px, rerenderAll))
+	add(slider("Space between cards", "gap", nx(), 0, 24, 1, px, rerenderAll))
+	add(slider("Big preview size (or drag its corner)", "bigSize", nx(), 140, 700, 10, px))
+
 	add(sectionTitle("Appearance", nx()))
 	add(dimText("Theme", nx(), 11))
 	add(segmented(nx(), {
@@ -3233,10 +4301,7 @@ local function buildSettingsPage(ctx)
 		{ key = "sourcesans", text = "Source Sans" },
 		{ key = "arial", text = "Arial" },
 	}, "font", appearance))
-	add(stepper("Text size", "textScale", nx(), 80, 130, 5, function(v)
-		return v .. "%"
-	end, appearance))
-	add(stepper("Corner roundness", "corner", nx(), 0, 16, 2, px, appearance))
+	add(slider("Corner roundness", "corner", nx(), 0, 20, 1, px, appearance))
 	add(dimText("Animations", nx(), 11))
 	add(segmented(nx(), {
 		{ key = "off", text = "Off" },
@@ -3250,10 +4315,8 @@ local function buildSettingsPage(ctx)
 		{ key = "grid", text = "Grid (boxes)" },
 		{ key = "list", text = "List (rows)" },
 	}, "layout", rerenderAll))
-	add(stepper("Card / preview size", "cardSize", nx(), 64, 200, 8, px, rerenderAll))
-	add(stepper("Space between cards", "gap", nx(), 2, 24, 2, px, rerenderAll))
 	add(toggle("Show details on cards", "showDetails", nx(), rerenderAll))
-	add(stepper("Max items shown", "maxItems", nx(), 50, 2000, 50, tostring, rerenderAll))
+	add(slider("Max items shown", "maxItems", nx(), 50, 2000, 50, tostring, rerenderAll))
 	add(dimText("Inserter details panel", nx(), 11))
 	add(segmented(nx(), {
 		{ key = "top", text = "Above the list" },
@@ -3261,15 +4324,15 @@ local function buildSettingsPage(ctx)
 	}, "infoPos", applyInfoPos))
 
 	add(sectionTitle("3D previews", nx()))
+	add(dimText("Click a preview to open the big view. Its buttons: Keep open, Insert, Show meshes, X.", nx(), 11))
+	add(toggle("Also open the big view on hover", "hoverExpand", nx()))
+	add(slider("Hover wait before it opens", "hoverDelay", nx(), 0, 20, 1, secs))
+	add(slider("Grow / shrink speed", "expandSpeed", nx(), 0, 15, 1, secs))
+	add(slider("Ignore clicks right after it opens", "clickGuard", nx(), 0, 15, 1, secs))
 	add(toggle("Spin previews", "spin", nx()))
-	add(stepper("Spin speed", "spinSpeed", nx(), 2, 30, 2, function(v)
+	add(slider("Spin speed", "spinSpeed", nx(), 1, 30, 1, function(v)
 		return string.format("%.1fx", v / 10)
 	end))
-	add(toggle("Grow into a big preview on hover", "hoverEnlarge", nx()))
-	add(stepper("Hover delay", "hoverDelay", nx(), 0, 15, 1, function(v)
-		return string.format("%.1f s", v / 10)
-	end))
-	add(stepper("Big preview size", "bigSize", nx(), 140, 480, 20, px))
 	add(dimText("Lighting", nx(), 11))
 	add(segmented(nx(), {
 		{ key = "follow", text = "Follows view" },
@@ -3292,16 +4355,28 @@ local function buildSettingsPage(ctx)
 	add(toggle("Add part name (e.g. AK47_Magazine)", "addPart", nx(), rerenderAll))
 	add(toggle("Add mesh ID to file names", "addId", nx(), rerenderAll))
 	add(toggle("Folder per model", "folderPerModel", nx(), rerenderAll))
+	local clearNames = add(button("Forget names I typed on cards", "secondary", nx()))
+	clearNames.MouseButton1Click:Connect(function()
+		renames = {}
+		saveRenames()
+		rerenderAll()
+	end)
 
 	add(sectionTitle("Pivots", nx()))
-	add(dimText("Model pivot (used by Build, Save, Insert and Apply pivots)", nx(), 11))
+	add(dimText("Model centre", nx(), 11))
 	add(segmented(nx(), {
-		{ key = "keep", text = "Keep" },
 		{ key = "middle", text = "Middle" },
 		{ key = "average", text = "Average" },
-	}, "modelPivot"))
-	add(dimText("Middle = centre of the box around the whole model (halfway between its farthest edges). Average = average position of all its parts, so it leans toward where most parts are.", nx(), 11))
-	add(toggle("Center each part's pivot on itself", "partPivots", nx()))
+	}, "pivotMode"))
+	add(dimText("Middle = centre of the box around the whole model. Average = average position of all its parts (leans toward where most parts are).", nx(), 10))
+	add(dimText("Reset pivots changes", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "model", text = "Model only" },
+		{ key = "parts", text = "Parts only" },
+		{ key = "both", text = "Both" },
+	}, "pivotScope"))
+	add(dimText("Model only keeps every mesh's own pivot (offsets stay). Parts only moves each mesh's pivot to its own centre. The originals are always saved on the objects, so Restore pivots puts them back - even after saving or inserting.", nx(), 10))
+	add(toggle("Reset pivots when building / saving / inserting", "pivotOnInsert", nx()))
 
 	add(sectionTitle("Collector", nx()))
 	add(toggle("Live (follow what I click)", "live", nx(), rerenderAll))
@@ -3316,6 +4391,7 @@ local function buildSettingsPage(ctx)
 		for _, b in ipairs(customBoxes) do
 			b.Text = ""
 		end
+		applyUiScale()
 		applyAppearance(true)
 		syncControls(true)
 		rerenderAll()
