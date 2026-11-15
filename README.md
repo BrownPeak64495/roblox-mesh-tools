@@ -9,7 +9,7 @@
 ## Install
 1. Download **[Install Mesh Downloader.bat](https://github.com/BrownPeak64495/roblox-mesh-tools/raw/main/Install%20Mesh%20Downloader.bat)** and double-click it
    (SmartScreen? More info > Run anyway).
-2. It installs to `%LOCALAPPDATA%\Programs\Mesh Downloader`, opens the app, and the app adds a
+2. Pick where to install (any drive). It makes a `Mesh Downloader` folder there, opens the app, and the app adds a
    **Mesh Downloader** icon to your Desktop and Start menu and installs the Studio plugin.
 3. Restart Studio.
 

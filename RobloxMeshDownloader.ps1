@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '3.2'
+$AppVersion = '3.3'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -42,10 +42,26 @@ if (-not $script:mutexCreated) {
 $AppDir       = Join-Path $env:APPDATA 'RobloxMeshDownloader'
 $KeyFile      = Join-Path $AppDir 'apikey.dat'
 $SettingsFile = Join-Path $AppDir 'settings.json'
-$LibDir       = Join-Path $AppDir 'library'   # permanent copy of every .mesh (named <id>.mesh)
-$IndexFile    = Join-Path $AppDir 'library.json'   # names + stats for the Inserter
+# The mesh library lives next to the app (wherever you installed it, e.g. an external drive).
+# Only small settings + the encrypted API key stay in AppData.
+$LibDir       = Join-Path $PSScriptRoot 'library'       # permanent copy of every .mesh (named <id>.mesh)
+$IndexFile    = Join-Path $PSScriptRoot 'library.json'  # names + stats for the Inserter
 if (-not (Test-Path $AppDir)) { New-Item -ItemType Directory -Path $AppDir | Out-Null }
 if (-not (Test-Path $LibDir)) { New-Item -ItemType Directory -Path $LibDir | Out-Null }
+# Move a library from older versions (kept in AppData on the C: drive) next to the app.
+try {
+    $oldLib = Join-Path $AppDir 'library'
+    if (Test-Path -LiteralPath $oldLib) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $oldLib -File -ErrorAction SilentlyContinue)) {
+            $t = Join-Path $LibDir $f.Name
+            if (-not (Test-Path -LiteralPath $t)) { Copy-Item -LiteralPath $f.FullName -Destination $t }
+        }
+        Remove-Item -LiteralPath $oldLib -Recurse -Force
+    }
+    $oldIndex = Join-Path $AppDir 'library.json'
+    if ((Test-Path -LiteralPath $oldIndex) -and -not (Test-Path -LiteralPath $IndexFile)) { Copy-Item -LiteralPath $oldIndex -Destination $IndexFile }
+    if (Test-Path -LiteralPath $oldIndex) { Remove-Item -LiteralPath $oldIndex -Force }
+} catch { }
 
 function Save-ApiKey([string]$key) {
     if (-not $key) { return }
@@ -67,7 +83,7 @@ function Load-ApiKey {
 
 function Load-Settings {
     $d = @{
-        folder       = (Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Roblox Meshes')
+        folder       = (Join-Path $PSScriptRoot 'Roblox Meshes')
         listen       = $true
         openWhenDone = $false
         useFolders   = $true
@@ -254,7 +270,7 @@ $xaml = @'
           </Border>
           <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="Mesh Downloader" Foreground="#F2F2F5" FontWeight="Bold" FontSize="15"/>
-            <TextBlock x:Name="VersionText" Text="v3.2" Foreground="#6F6F78" FontSize="11"/>
+            <TextBlock x:Name="VersionText" Text="v3.3" Foreground="#6F6F78" FontSize="11"/>
           </StackPanel>
         </StackPanel>
         <Border Grid.Column="1" CornerRadius="8" Background="#141418" BorderBrush="#2A2A31"
@@ -1023,7 +1039,7 @@ function Check-Updates([switch]$Manual) {
             return
         }
         Log "Updating to v$remote..."
-        $tmp = Join-Path $AppDir 'update'
+        $tmp = Join-Path $PSScriptRoot '_update'
         if (Test-Path $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force }
         New-Item -ItemType Directory -Path $tmp | Out-Null
         $names = @()

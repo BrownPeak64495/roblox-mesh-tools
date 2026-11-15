@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v3.2
+ROBLOX MESH TOOLS v3.3
 ======================
 
 What's in here
@@ -31,7 +31,7 @@ If you still have MeshIdCollector.lua (v1) in the Plugins folder, delete it.
 Only .lua plugin files belong in the Plugins folder.
 
 --------------------------------------------------
-WHERE THINGS GO  (Documents\Roblox Meshes by default)
+WHERE THINGS GO  (inside the folder you installed to, e.g. your external drive)
 --------------------------------------------------
   <name>.mesh / <Model>\<name>.mesh   downloaded meshes
   Models\                             downloaded model IDs + "Save model"
@@ -113,6 +113,10 @@ time it opens (then restart Studio to load a new plugin version).
 --------------------------------------------------
 LIMITS
 --------------------------------------------------
+ - Installed on an external drive? Plug it in before opening the app.
+   Studio's own copies of your meshes (in its content folder) stay on C:
+   - Studio can only load local meshes from there. Settings + your
+   encrypted API key also stay in AppData (tiny).
  - Local meshes (rbxasset://) only load in Studio on a PC that has the
    files. Players in a published game will NOT see them.
  - Studio updates wipe its content folder; the app re-installs the meshes
