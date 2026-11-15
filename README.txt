@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v3.6
+ROBLOX MESH TOOLS v4.0
 ======================
 
 What's in here
@@ -36,26 +36,11 @@ WHERE THINGS GO  (inside the folder you installed to, e.g. your external drive)
   Make Local\                         drop .rbxmx files here to convert them
 
 --------------------------------------------------
-MESH COLLECTOR (Studio)
+MESH COLLECTOR (Studio)  - tabs: Collector | Settings
 --------------------------------------------------
-Click any model/part - the list updates live.
-
-Settings (click "Settings" to fold them away):
-  Name files by:  Part | Parent | Model (closest) | Top (outermost) | Custom
-  Custom name:    used when Custom is picked, AND as the file name for
-                  saved / built models (leave empty to use the model's name)
-  Add part name:  AK47_Magazine instead of AK47
-  Add mesh ID:    off = Magazine.mesh instead of Magazine_123456.mesh
-                  (two different meshes with the same name become "Name (2)")
-  Folder per model
-  Model pivot:    Keep | Middle | Average
-                  Middle = center of the box around the whole model
-                  (halfway between its farthest edges).
-                  Average = average position of all its parts, so it
-                  leans toward where most parts are.
-  Center each part's pivot on itself
-  (Pivot settings are used by Build local copy, Save model, Insert, and the
-   "Apply pivots" button - which works on ANY selected model or part.)
+Click any model/part - the cards update live, grouped by model.
+Click a card's name to select that part in Studio; click a model's
+header to select the whole model.
 
 Buttons:
   Send to Downloader   download the listed meshes
@@ -68,27 +53,38 @@ Buttons:
   Open Inserter
 
 --------------------------------------------------
-MESH INSERTER (Studio)
+MESH INSERTER (Studio)  - tabs: Library | Settings
 --------------------------------------------------
-Shows everything you've downloaded or saved:
-  MODELS - click the arrow to expand a model and see its meshes
-  MESHES - every downloaded .mesh
-Search box filters both. Refresh reloads the list.
+MODELS - press + on a model card to show its meshes below
+MESHES - every downloaded .mesh
+Click a card's name -> details + Insert / Show in folder.
+Insert: a mesh -> MeshPart loading your local .mesh; a model -> the whole
+thing with its folders/models; a part -> just that part.
 
-Every row has its own little spinning preview (Collector and Inserter):
-  hover it  -> it gets bigger (move away -> it shrinks)
-  click it  -> it stays big (click again to shrink)
-  drag      -> rotate it,  scroll -> zoom
-The light follows your view, so every side is lit when you look at it.
-Click a row's NAME to select it (Collector: selects it in Studio;
-Inserter: shows its details below the list).
+--------------------------------------------------
+3D PREVIEWS (every card)
+--------------------------------------------------
+  hover   -> smoothly grows into a big preview; move away -> shrinks back
+  click   -> opens big and stays open (click it again to let go)
+  drag    -> rotate,  scroll -> zoom
+The light follows your view (or pick Flat lighting in Settings).
 
-Insert:
-  a mesh   -> a MeshPart that loads your local .mesh
-  a model  -> the whole thing, keeping its folders / models / other objects
-  a part   -> just that part (with its texture)
-It lands in front of the camera and gets selected.
-Show in folder opens the file in File Explorer.
+--------------------------------------------------
+SETTINGS TAB (same in both windows)
+--------------------------------------------------
+Appearance: Theme (Studio / Dark / Classic grey / Midnight), accent colour,
+            font, text size, corner roundness, animation speed (or off)
+Layout:     Grid boxes or List rows, card size, spacing, details on cards,
+            max items shown, Inserter details panel above/below the list
+Previews:   spin on/off + speed, grow on hover on/off + delay, big preview
+            size, lighting
+Naming:     Name files by Part / Parent / Model / Top / Custom, custom name,
+            add part name, add mesh ID, folder per model
+Pivots:     Model pivot Keep / Middle / Average, center part pivots
+              Middle  = centre of the box around the whole model
+              Average = average position of all its parts
+Collector:  Live, download right away
+Reset all settings
 
 --------------------------------------------------
 APP OPTIONS

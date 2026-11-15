@@ -1,22 +1,18 @@
 --[[
-	Mesh Tools v3 - Roblox Studio plugin (works with the Mesh Downloader app)
+	Mesh Tools v4 - Roblox Studio plugin (works with the Mesh Downloader app)
 
-	MESH COLLECTOR
-	- Live list of the meshes in whatever you click.
-	- Name files by Part / Parent / Model / Top Model / Custom, optional part name and mesh ID.
-	- Pivot tools: model pivot to Middle or Average, part pivots to their own center.
-	- Send to Downloader, Build local copy (real MeshParts using your .mesh files),
-	  Save model. Models are saved BY THE APP into Documents\Roblox Meshes
-	  (never into the Plugins folder).
+	MESH COLLECTOR  - live cards of the meshes in whatever you click, download them,
+	                  build local copies (real MeshParts using your .mesh files), save models.
+	MESH INSERTER   - browse, preview and insert every mesh and model you've downloaded.
+	SETTINGS        - themes (Studio / Dark / Classic / Midnight), accent colour, fonts,
+	                  grid or list, card size, spacing, previews, animations and more.
 
-	MESH INSERTER
-	- Browse every mesh and model you've downloaded or saved.
-	- Models expand to show their meshes.
-	- Spinning 3D preview: hover to stop, drag to look around, scroll to zoom.
-	- Insert keeps the model's folders / models / other objects.
+	Every card has a small spinning 3D preview:
+	  hover   -> it smoothly grows into a big preview (move away -> it shrinks back)
+	  click   -> opens it big and keeps it open (click again to let it go)
+	  drag    -> rotate,  scroll -> zoom
 
-	Install: put this file in your Studio Plugins folder (Plugins tab > Plugins Folder)
-	and restart Studio. Only .lua plugin files belong in that folder.
+	Installed and updated automatically by Mesh Downloader.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -24,6 +20,7 @@ local Selection = game:GetService("Selection")
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local AssetService = game:GetService("AssetService")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local Studio = settings().Studio
 
 local SerializationService = nil
@@ -31,71 +28,303 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "3.6" -- keep in sync with version.json
+local PLUGIN_VERSION = "4.0" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
 local LOCAL_PREFIX = "rbxasset://meshtools/"
-local MAX_ROWS = 300
-
-local ACCENT = Color3.fromRGB(124, 131, 245)
-local WHITE = Color3.fromRGB(255, 255, 255)
-local GREEN = Color3.fromRGB(61, 220, 132)
-local RED = Color3.fromRGB(242, 95, 92)
-local GREY = Color3.fromRGB(130, 130, 140)
 
 local C = Enum.StudioStyleGuideColor
+local function rgb(r, g, b)
+	return Color3.fromRGB(r, g, b)
+end
+local RED = rgb(235, 90, 85)
+local GREEN = rgb(52, 190, 110)
+local WHITE = rgb(255, 255, 255)
 
 -------------------------------------------------------------------
--- Settings
+-- Settings (saved per Studio user)
 -------------------------------------------------------------------
-local function getSetting(key, default)
-	local ok, v = pcall(function()
-		return plugin:GetSetting(key)
+local DEFAULTS = {
+	-- collector behaviour
+	nameSource = "top", -- part | parent | model | top | custom
+	addPart = true,
+	addId = true,
+	customName = "",
+	folderPerModel = true,
+	modelPivot = "keep", -- keep | middle | average
+	partPivots = false,
+	live = true,
+	autoStart = true,
+	-- appearance
+	theme = "studio", -- studio | dark | classic | midnight
+	accent = "purple",
+	font = "gotham", -- gotham | sourcesans | arial
+	textScale = 100, -- percent
+	corner = 8, -- px
+	anim = "normal", -- off | fast | normal | slow
+	-- layout
+	layout = "grid", -- grid | list
+	cardSize = 96, -- preview size in px
+	gap = 8,
+	showDetails = true,
+	infoPos = "bottom", -- inserter details panel: top | bottom
+	maxItems = 300,
+	-- previews
+	spin = true,
+	spinSpeed = 8, -- tenths
+	hoverEnlarge = true,
+	hoverDelay = 4, -- tenths of a second
+	bigSize = 240,
+	lighting = "follow", -- follow | flat
+}
+
+local LEGACY = {
+	nameSource = "v3_nameSource",
+	addPart = "v3_addPart",
+	addId = "v3_addId",
+	customName = "v3_customName",
+	modelPivot = "v3_modelPivot",
+	partPivots = "v3_partPivots",
+	folderPerModel = "folderPerModel",
+	live = "live",
+	autoStart = "autoStart",
+}
+
+local function readSetting(key)
+	local v = nil
+	pcall(function()
+		v = plugin:GetSetting(key)
 	end)
-	if not ok or v == nil then
-		return default
-	end
 	return v
 end
 
-local state = {
-	nameSource = getSetting("v3_nameSource", "top"), -- part | parent | model | top | custom
-	addPart = getSetting("v3_addPart", true),
-	addId = getSetting("v3_addId", true),
-	customName = getSetting("v3_customName", ""),
-	folderPerModel = getSetting("folderPerModel", true),
-	modelPivot = getSetting("v3_modelPivot", "keep"), -- keep | middle | average
-	partPivots = getSetting("v3_partPivots", false),
-	live = getSetting("live", true),
-	autoStart = getSetting("autoStart", true),
-	settingsOpen = getSetting("v3_settingsOpen", true),
-}
-
-local function saveSetting(key, value)
-	state[key] = value
-	local storeKey = key
-	if key ~= "folderPerModel" and key ~= "live" and key ~= "autoStart" then
-		storeKey = "v3_" .. key
+local S = {}
+for k, d in pairs(DEFAULTS) do
+	local v = readSetting("v4_" .. k)
+	if v == nil and LEGACY[k] then
+		v = readSetting(LEGACY[k])
 	end
+	if v == nil or type(v) ~= type(d) then
+		v = d
+	end
+	S[k] = v
+end
+
+local function save(key, value)
+	S[key] = value
 	pcall(function()
-		plugin:SetSetting(storeKey, value)
+		plugin:SetSetting("v4_" .. key, value)
 	end)
 end
 
 -------------------------------------------------------------------
--- UI helpers
+-- Animation
 -------------------------------------------------------------------
-local themed = {}
-local function themeColor(color)
-	return Studio.Theme:GetColor(color)
+local ANIM = { off = 0, fast = 0.12, normal = 0.22, slow = 0.4 }
+local function animTime(mult)
+	return (ANIM[S.anim] or 0.22) * (mult or 1)
 end
-local function theme(inst, prop, color)
-	table.insert(themed, { inst, prop, color })
-	inst[prop] = themeColor(color)
+
+local function tween(inst, props, mult, style)
+	local t = animTime(mult)
+	if t <= 0 then
+		for k, v in pairs(props) do
+			pcall(function()
+				inst[k] = v
+			end)
+		end
+		return nil
+	end
+	local ok, tw = pcall(function()
+		return TweenService:Create(inst, TweenInfo.new(t, style or Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props)
+	end)
+	if ok and tw then
+		tw:Play()
+		return tw
+	end
+	return nil
+end
+
+-------------------------------------------------------------------
+-- Themes
+-------------------------------------------------------------------
+local ACCENTS = {
+	purple = rgb(124, 131, 245),
+	blue = rgb(64, 140, 240),
+	green = rgb(46, 180, 115),
+	orange = rgb(240, 140, 50),
+	pink = rgb(232, 92, 160),
+	red = rgb(226, 78, 78),
+	gray = rgb(120, 124, 135),
+}
+local ACCENT_ORDER = { "purple", "blue", "green", "orange", "pink", "red", "gray" }
+
+local PALETTES = {
+	dark = {
+		bg = rgb(14, 14, 17), panel = rgb(20, 20, 24), input = rgb(26, 26, 31), border = rgb(46, 46, 54),
+		text = rgb(236, 236, 240), dim = rgb(140, 140, 150), button = rgb(30, 30, 36), buttonText = rgb(230, 230, 235),
+		card = rgb(24, 24, 29), cardHover = rgb(36, 36, 44), preview = rgb(17, 17, 21), header = rgb(30, 30, 36),
+	},
+	-- light grey "classic plugin" look: grey gradient, white boxes, grey buttons, dark bold text
+	classic = {
+		bg = rgb(204, 204, 204), bg2 = rgb(156, 156, 156), panel = rgb(255, 255, 255), input = rgb(255, 255, 255),
+		border = rgb(150, 150, 150), text = rgb(28, 28, 28), dim = rgb(105, 105, 105), button = rgb(226, 226, 226),
+		buttonText = rgb(24, 24, 24), card = rgb(255, 255, 255), cardHover = rgb(236, 236, 236),
+		preview = rgb(255, 255, 255), header = rgb(218, 218, 218),
+	},
+	midnight = {
+		bg = rgb(11, 15, 28), panel = rgb(17, 23, 42), input = rgb(21, 29, 52), border = rgb(42, 54, 90),
+		text = rgb(230, 236, 250), dim = rgb(132, 146, 182), button = rgb(28, 38, 68), buttonText = rgb(225, 232, 250),
+		card = rgb(19, 27, 50), cardHover = rgb(30, 41, 74), preview = rgb(13, 19, 36), header = rgb(26, 34, 62),
+	},
+}
+
+local function studioPalette()
+	local th = Studio.Theme
+	-- colours are looked up by name so a missing one can't break the plugin
+	local function g(name, hover)
+		local ok, v = pcall(function()
+			if hover then
+				return th:GetColor(C[name], Enum.StudioStyleGuideModifier.Hover)
+			end
+			return th:GetColor(C[name])
+		end)
+		return ok and v or nil
+	end
+	local bg = g("MainBackground") or rgb(46, 46, 46)
+	return {
+		bg = bg, panel = bg, input = g("InputFieldBackground") or rgb(37, 37, 37), border = g("Border") or rgb(34, 34, 34),
+		text = g("MainText") or rgb(220, 220, 220), dim = g("DimmedText") or rgb(140, 140, 140),
+		button = g("Button") or rgb(60, 60, 60), buttonText = g("ButtonText") or rgb(220, 220, 220),
+		card = g("InputFieldBackground") or rgb(37, 37, 37), cardHover = g("Button", true) or rgb(70, 70, 70),
+		preview = g("ViewPortBackground") or rgb(30, 30, 30), header = g("Titlebar") or rgb(53, 53, 53),
+	}
+end
+
+local palette = {}
+local function refreshPalette()
+	local p
+	if S.theme == "studio" then
+		p = studioPalette()
+	else
+		p = {}
+		for k, v in pairs(PALETTES[S.theme] or PALETTES.dark) do
+			p[k] = v
+		end
+	end
+	p.accent = ACCENTS[S.accent] or ACCENTS.purple
+	p.accentText = WHITE
+	palette = p
+end
+refreshPalette()
+
+local function T(key)
+	return palette[key] or palette.text
+end
+
+local FONTS = {
+	gotham = { regular = Enum.Font.GothamMedium, bold = Enum.Font.GothamBold, mono = Enum.Font.Code },
+	sourcesans = { regular = Enum.Font.SourceSans, bold = Enum.Font.SourceSansBold, mono = Enum.Font.Code },
+	arial = { regular = Enum.Font.Arial, bold = Enum.Font.ArialBold, mono = Enum.Font.Code },
+}
+local function fontFor(weight)
+	local f = FONTS[S.font] or FONTS.gotham
+	return f[weight] or f.regular
+end
+local function textSize(base)
+	return math.max(8, math.floor(base * S.textScale / 100 + 0.5))
+end
+
+-- Everything themed is registered here so a theme change can recolour it.
+local reg = setmetatable({}, { __mode = "k" })
+local gradients = setmetatable({}, { __mode = "k" })
+
+local function regOf(inst)
+	local r = reg[inst]
+	if not r then
+		r = { props = {} }
+		reg[inst] = r
+	end
+	return r
+end
+
+local function bind(inst, prop, key)
+	regOf(inst).props[prop] = key
+	inst[prop] = T(key)
 	return inst
 end
 
+local function bindText(inst, base, weight)
+	local r = regOf(inst)
+	r.text = { base, weight or "regular" }
+	inst.TextSize = textSize(base)
+	inst.Font = fontFor(weight or "regular")
+	return inst
+end
+
+local function bindCorner(c, mult)
+	regOf(c).corner = mult or 1
+	c.CornerRadius = UDim.new(0, math.floor(S.corner * (mult or 1) + 0.5))
+	return c
+end
+
+local function applyGradient(g)
+	if palette.bg2 then
+		g.Enabled = true
+		g.Color = ColorSequence.new(WHITE, WHITE)
+		g.Transparency = NumberSequence.new(0)
+		-- gradient tints the frame colour: top = bg, bottom = bg2 (relative brightness)
+		local top, bottom = palette.bg, palette.bg2
+		g.Color = ColorSequence.new(
+			rgb(255, 255, 255),
+			Color3.new(bottom.R / math.max(top.R, 0.01), bottom.G / math.max(top.G, 0.01), bottom.B / math.max(top.B, 0.01))
+		)
+	else
+		g.Enabled = false
+	end
+end
+
+local controlRenderers = {}
+local function syncControls(anim)
+	for _, r in ipairs(controlRenderers) do
+		pcall(r, anim)
+	end
+end
+
+local function applyAppearance(animated)
+	refreshPalette()
+	for inst, r in pairs(reg) do
+		for prop, key in pairs(r.props) do
+			if animated then
+				tween(inst, { [prop] = T(key) }, 1.4)
+			else
+				pcall(function()
+					inst[prop] = T(key)
+				end)
+			end
+		end
+		if r.text then
+			pcall(function()
+				inst.TextSize = textSize(r.text[1])
+				inst.Font = fontFor(r.text[2])
+			end)
+		end
+		if r.corner then
+			pcall(function()
+				inst.CornerRadius = UDim.new(0, math.floor(S.corner * r.corner + 0.5))
+			end)
+		end
+	end
+	for g in pairs(gradients) do
+		pcall(applyGradient, g)
+	end
+	syncControls(false)
+end
+
+-------------------------------------------------------------------
+-- UI building blocks
+-------------------------------------------------------------------
 local function new(className, props, children)
 	local inst = Instance.new(className)
 	for k, v in pairs(props or {}) do
@@ -107,8 +336,8 @@ local function new(className, props, children)
 	return inst
 end
 
-local function corner(r)
-	return new("UICorner", { CornerRadius = UDim.new(0, r) })
+local function corner(mult)
+	return bindCorner(Instance.new("UICorner"), mult)
 end
 
 local function padding(t, r, b, l)
@@ -120,9 +349,9 @@ local function padding(t, r, b, l)
 	})
 end
 
-local function stroke()
+local function stroke(key)
 	local s = new("UIStroke", { Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
-	theme(s, "Color", C.Border)
+	bind(s, "Color", key or "border")
 	return s
 end
 
@@ -143,53 +372,79 @@ local function hlist(gap)
 	})
 end
 
-local function label(props)
+local function flexFill(inst)
+	pcall(function()
+		new("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }).Parent = inst
+	end)
+end
+
+local function text(props, base, weight, colorKey)
 	local l = new("TextLabel", {
 		BackgroundTransparency = 1,
-		Font = Enum.Font.GothamMedium,
-		TextSize = 13,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		TextYAlignment = Enum.TextYAlignment.Center,
 	})
 	for k, v in pairs(props) do
 		l[k] = v
 	end
-	if not props.TextColor3 then
-		theme(l, "TextColor3", C.MainText)
-	end
+	bindText(l, base or 13, weight or "regular")
+	bind(l, "TextColor3", colorKey or "text")
 	return l
 end
 
-local function dimLabel(text, order, size)
-	local l = label({
-		Text = text,
-		TextSize = size or 12,
+local function dimText(str, order, base)
+	return text({
+		Text = str,
 		TextWrapped = true,
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		LayoutOrder = order or 0,
-	})
-	theme(l, "TextColor3", C.DimmedText)
-	return l
+	}, base or 12, "regular", "dim")
 end
 
-local function button(text, primary, order)
+local function pressable(b)
+	local sc = Instance.new("UIScale")
+	sc.Parent = b
+	b.MouseButton1Down:Connect(function()
+		tween(sc, { Scale = 0.96 }, 0.4)
+	end)
+	b.MouseButton1Up:Connect(function()
+		tween(sc, { Scale = 1 }, 0.7)
+	end)
+	b.MouseLeave:Connect(function()
+		tween(sc, { Scale = 1 }, 0.7)
+	end)
+end
+
+local function button(label_, kind, order)
 	local b = new("TextButton", {
 		Size = UDim2.new(1, 0, 0, 34),
-		Text = text,
-		Font = Enum.Font.GothamBold,
-		TextSize = 13,
-		AutoButtonColor = true,
+		Text = label_,
+		AutoButtonColor = false,
 		LayoutOrder = order or 0,
-	}, { corner(8) })
-	if primary then
-		b.BackgroundColor3 = ACCENT
-		b.TextColor3 = WHITE
+	}, { corner(1) })
+	bindText(b, 13, "bold")
+	if kind == "primary" then
+		bind(b, "BackgroundColor3", "accent")
+		bind(b, "TextColor3", "accentText")
+		b.MouseEnter:Connect(function()
+			tween(b, { BackgroundTransparency = 0.15 }, 0.6)
+		end)
+		b.MouseLeave:Connect(function()
+			tween(b, { BackgroundTransparency = 0 }, 0.8)
+		end)
 	else
-		theme(b, "BackgroundColor3", C.InputFieldBackground)
-		theme(b, "TextColor3", C.MainText)
+		bind(b, "BackgroundColor3", "button")
+		bind(b, "TextColor3", "buttonText")
 		stroke().Parent = b
+		b.MouseEnter:Connect(function()
+			tween(b, { BackgroundColor3 = T("cardHover") }, 0.6)
+		end)
+		b.MouseLeave:Connect(function()
+			tween(b, { BackgroundColor3 = T("button") }, 0.8)
+		end)
 	end
+	pressable(b)
 	return b
 end
 
@@ -205,65 +460,34 @@ local function buttonRow(order, buttons)
 end
 
 local function textInput(placeholder, order, initial)
-	local holder = new("Frame", { Size = UDim2.new(1, 0, 0, 30), LayoutOrder = order }, { corner(7) })
-	theme(holder, "BackgroundColor3", C.InputFieldBackground)
-	stroke().Parent = holder
+	local holder = new("Frame", { Size = UDim2.new(1, 0, 0, 30), LayoutOrder = order }, { corner(0.85) })
+	bind(holder, "BackgroundColor3", "input")
+	local st = stroke()
+	st.Parent = holder
 	local box = new("TextBox", {
 		Size = UDim2.new(1, -16, 1, 0),
 		Position = UDim2.fromOffset(8, 0),
 		BackgroundTransparency = 1,
 		ClearTextOnFocus = false,
-		Font = Enum.Font.GothamMedium,
-		TextSize = 12,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		PlaceholderText = placeholder,
 		Text = initial or "",
 	})
-	theme(box, "TextColor3", C.MainText)
-	theme(box, "PlaceholderColor3", C.DimmedText)
+	bindText(box, 12, "regular")
+	bind(box, "TextColor3", "text")
+	bind(box, "PlaceholderColor3", "dim")
 	box.Parent = holder
+	box.Focused:Connect(function()
+		tween(st, { Color = T("accent"), Thickness = 2 }, 0.8)
+	end)
+	box.FocusLost:Connect(function()
+		tween(st, { Color = T("border"), Thickness = 1 }, 0.8)
+	end)
 	return holder, box
 end
 
-local renderers = {} -- re-run on theme change
-
-local function makeSegmented(order, options, getValue, setValue, textSize)
-	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = order }, { hlist(4) })
-	local buttons = {}
-	local n = #options
-	local function render()
-		for key, b in pairs(buttons) do
-			if getValue() == key then
-				b.BackgroundColor3 = ACCENT
-				b.TextColor3 = WHITE
-			else
-				b.BackgroundColor3 = themeColor(C.InputFieldBackground)
-				b.TextColor3 = themeColor(C.MainText)
-			end
-		end
-	end
-	for i, opt in ipairs(options) do
-		local b = new("TextButton", {
-			Size = UDim2.new(1 / n, -math.floor(4 * (n - 1) / n), 1, 0),
-			Text = opt.text,
-			Font = Enum.Font.GothamMedium,
-			TextSize = textSize or 12,
-			AutoButtonColor = true,
-			LayoutOrder = i,
-		}, { corner(7) })
-		b.Parent = row
-		buttons[opt.key] = b
-		b.MouseButton1Click:Connect(function()
-			setValue(opt.key)
-			render()
-		end)
-	end
-	render()
-	table.insert(renderers, render)
-	return row, render
-end
-
-local function makeToggle(text, key, order, onChange)
+-- On/off switch with a sliding knob
+local function toggle(label_, key, order, onChange)
 	local row = new("TextButton", {
 		Size = UDim2.new(1, 0, 0, 26),
 		BackgroundTransparency = 1,
@@ -271,34 +495,192 @@ local function makeToggle(text, key, order, onChange)
 		AutoButtonColor = false,
 		LayoutOrder = order,
 	})
-	label({ Text = text, TextSize = 12, Size = UDim2.new(1, -50, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd }).Parent = row
+	text({ Text = label_, Size = UDim2.new(1, -50, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd }, 12, "regular", "text").Parent = row
 	local track = new("Frame", {
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, 0, 0.5, 0),
 		Size = UDim2.fromOffset(38, 22),
-	}, { corner(11) })
+	}, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
 	track.Parent = row
-	local knob = new("Frame", { Size = UDim2.fromOffset(16, 16), BackgroundColor3 = WHITE }, { corner(8) })
+	local knob = new("Frame", { Size = UDim2.fromOffset(16, 16), BackgroundColor3 = WHITE }, {
+		new("UICorner", { CornerRadius = UDim.new(1, 0) }),
+	})
 	knob.Parent = track
-	local function render()
-		if state[key] then
-			track.BackgroundColor3 = ACCENT
-			knob.Position = UDim2.new(1, -19, 0.5, -8)
+	local function render(anim)
+		local on = S[key]
+		local col = on and T("accent") or T("border")
+		local pos = on and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+		if anim then
+			tween(track, { BackgroundColor3 = col })
+			tween(knob, { Position = pos }, 1, Enum.EasingStyle.Back)
 		else
-			track.BackgroundColor3 = themeColor(C.InputFieldBorder)
-			knob.Position = UDim2.new(0, 3, 0.5, -8)
+			track.BackgroundColor3 = col
+			knob.Position = pos
 		end
 	end
 	row.MouseButton1Click:Connect(function()
-		saveSetting(key, not state[key])
-		render()
+		save(key, not S[key])
+		syncControls(true)
 		if onChange then
 			onChange()
 		end
 	end)
-	render()
-	table.insert(renderers, render)
+	render(false)
+	table.insert(controlRenderers, render)
 	return row
+end
+
+-- Row of choices; the picked one slides to the accent colour
+local function segmented(order, options, key, onChange, base)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = order }, { hlist(4) })
+	local buttons = {}
+	local n = #options
+	local function render(anim)
+		for k, b in pairs(buttons) do
+			local sel = S[key] == k
+			local props = {
+				BackgroundColor3 = sel and T("accent") or T("button"),
+				TextColor3 = sel and T("accentText") or T("buttonText"),
+			}
+			if anim then
+				tween(b, props)
+			else
+				b.BackgroundColor3 = props.BackgroundColor3
+				b.TextColor3 = props.TextColor3
+			end
+		end
+	end
+	for i, opt in ipairs(options) do
+		local b = new("TextButton", {
+			Size = UDim2.new(1 / n, -math.floor(4 * (n - 1) / n), 1, 0),
+			Text = opt.text,
+			AutoButtonColor = false,
+			LayoutOrder = i,
+		}, { corner(0.85) })
+		bindText(b, base or 12, "regular")
+		b.Parent = row
+		pressable(b)
+		buttons[opt.key] = b
+		b.MouseButton1Click:Connect(function()
+			save(key, opt.key)
+			syncControls(true)
+			if onChange then
+				onChange()
+			end
+		end)
+	end
+	render(false)
+	table.insert(controlRenderers, render)
+	return row
+end
+
+-- "Label      [-]  value  [+]"
+local function stepper(label_, key, order, min, max, step, fmt, onChange)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = order })
+	text({ Text = label_, Size = UDim2.new(1, -130, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd }, 12, "regular", "text").Parent = row
+	local box = new("Frame", { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, 0, 0.5, 0), Size = UDim2.fromOffset(124, 26) }, { corner(0.85) })
+	bind(box, "BackgroundColor3", "input")
+	stroke().Parent = box
+	box.Parent = row
+	local function mk(t, x)
+		local b = new("TextButton", { Position = UDim2.fromOffset(x, 0), Size = UDim2.fromOffset(28, 26), BackgroundTransparency = 1, Text = t })
+		bindText(b, 15, "bold")
+		bind(b, "TextColor3", "text")
+		b.Parent = box
+		pressable(b)
+		return b
+	end
+	local minus = mk("-", 0)
+	local plus = mk("+", 96)
+	local value = text({ Position = UDim2.fromOffset(28, 0), Size = UDim2.fromOffset(68, 26), TextXAlignment = Enum.TextXAlignment.Center }, 12, "bold", "text")
+	value.Parent = box
+	local function render()
+		value.Text = fmt(S[key])
+	end
+	local function set(v)
+		v = math.clamp(v, min, max)
+		if v == S[key] then
+			return
+		end
+		save(key, v)
+		syncControls(true)
+		local sc = Instance.new("UIScale")
+		sc.Scale = 1.15
+		sc.Parent = value
+		local tw = tween(sc, { Scale = 1 }, 1)
+		if tw then
+			tw.Completed:Connect(function()
+				sc:Destroy()
+			end)
+		else
+			sc:Destroy()
+		end
+		if onChange then
+			onChange()
+		end
+	end
+	minus.MouseButton1Click:Connect(function()
+		set(S[key] - step)
+	end)
+	plus.MouseButton1Click:Connect(function()
+		set(S[key] + step)
+	end)
+	render()
+	table.insert(controlRenderers, render)
+	return row
+end
+
+-- Accent colour picker
+local function swatches(order, onChange)
+	local row = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = order }, { hlist(8) })
+	local dots = {}
+	local function render(anim)
+		for k, d in pairs(dots) do
+			local sel = S.accent == k
+			if anim then
+				tween(d.stroke, { Thickness = sel and 3 or 0 })
+				tween(d.scale, { Scale = sel and 1.12 or 1 }, 1, Enum.EasingStyle.Back)
+			else
+				d.stroke.Thickness = sel and 3 or 0
+				d.scale.Scale = sel and 1.12 or 1
+			end
+			d.stroke.Color = T("text")
+		end
+	end
+	for i, k in ipairs(ACCENT_ORDER) do
+		local b = new("TextButton", {
+			Size = UDim2.fromOffset(24, 24),
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundColor3 = ACCENTS[k],
+			LayoutOrder = i,
+		}, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+		local st = new("UIStroke", { Thickness = 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
+		st.Parent = b
+		local sc = Instance.new("UIScale")
+		sc.Parent = b
+		b.Parent = row
+		dots[k] = { stroke = st, scale = sc }
+		b.MouseButton1Click:Connect(function()
+			save("accent", k)
+			if onChange then
+				onChange()
+			end
+			syncControls(true)
+		end)
+	end
+	render(false)
+	table.insert(controlRenderers, render)
+	return row
+end
+
+local function sectionTitle(str, order)
+	local f = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = order })
+	text({ Text = str, Size = UDim2.new(1, 0, 0, 20), Position = UDim2.fromOffset(0, 8) }, 14, "bold", "text").Parent = f
+	local line = new("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 1, -1), BorderSizePixel = 0 })
+	bind(line, "BackgroundColor3", "border")
+	line.Parent = f
+	return f
 end
 
 -------------------------------------------------------------------
@@ -549,7 +931,7 @@ end
 -- File name (without ".mesh") for one mesh
 local function meshBaseName(owner)
 	local partName = clean(owner.Name)
-	local src = state.nameSource
+	local src = S.nameSource
 	if src == "part" then
 		return partName
 	end
@@ -563,34 +945,34 @@ local function meshBaseName(owner)
 		local m = topModel(owner)
 		base = m and m.Name
 	elseif src == "custom" then
-		if clean(state.customName) ~= "" then
-			base = state.customName
+		if clean(S.customName) ~= "" then
+			base = S.customName
 		end
 	end
 	if not base then
 		return partName
 	end
 	base = clean(base)
-	if state.addPart and base ~= partName then
+	if S.addPart and base ~= partName then
 		return base .. "_" .. partName
 	end
 	return base
 end
 
 local function folderFor(owner)
-	if not state.folderPerModel then
+	if not S.folderPerModel then
 		return nil
 	end
-	if state.nameSource == "custom" and clean(state.customName) ~= "" then
-		return clean(state.customName)
+	if S.nameSource == "custom" and clean(S.customName) ~= "" then
+		return clean(S.customName)
 	end
 	local m = topModel(owner)
 	return m and clean(m.Name) or nil
 end
 
 local function modelFileName(roots, suffix)
-	if clean(state.customName) ~= "" then
-		return clean(state.customName)
+	if clean(S.customName) ~= "" then
+		return clean(S.customName)
 	end
 	local n = roots[1] and clean(roots[1].Name) or "Model"
 	if #roots > 1 then
@@ -650,10 +1032,10 @@ end
 
 local function applyPivots(roots)
 	for _, r in ipairs(roots) do
-		if state.partPivots then
+		if S.partPivots then
 			centerPartPivots(r)
 		end
-		setModelPivot(r, state.modelPivot)
+		setModelPivot(r, S.modelPivot)
 	end
 end
 
@@ -780,7 +1162,7 @@ local function convertSpecialMesh(host, sm, id)
 end
 
 -------------------------------------------------------------------
--- Toolbar
+-- Toolbar, windows, tabs
 -------------------------------------------------------------------
 local toolbar = plugin:CreateToolbar("Mesh Tools")
 local collectorButton = toolbar:CreateButton("Mesh Collector", "Collect, download and save meshes", "")
@@ -793,7 +1175,7 @@ plugin.Unloading:Connect(function()
 	alive = false
 end)
 
--- Shared downloader-status pills
+-- Downloader status pills -------------------------------------------
 local pills = {}
 local function makePill(parent)
 	local pill = new("Frame", {
@@ -801,63 +1183,64 @@ local function makePill(parent)
 		Position = UDim2.new(1, 0, 0.5, 0),
 		Size = UDim2.new(0, 0, 0, 24),
 		AutomaticSize = Enum.AutomaticSize.X,
-	}, { corner(12), padding(0, 10, 0, 10), hlist(6) })
-	theme(pill, "BackgroundColor3", C.InputFieldBackground)
+	}, { new("UICorner", { CornerRadius = UDim.new(1, 0) }), padding(0, 10, 0, 10), hlist(6) })
+	bind(pill, "BackgroundColor3", "input")
 	stroke().Parent = pill
-	local dot = new("Frame", { Size = UDim2.fromOffset(8, 8), BackgroundColor3 = GREY, LayoutOrder = 1 }, { corner(4) })
-	dot.Parent = pill
-	local text = label({
-		Text = "Downloader: checking",
-		TextSize = 11,
-		Size = UDim2.new(0, 0, 1, 0),
-		AutomaticSize = Enum.AutomaticSize.X,
-		LayoutOrder = 2,
+	local dot = new("Frame", { Size = UDim2.fromOffset(8, 8), BackgroundColor3 = rgb(130, 130, 140), LayoutOrder = 1 }, {
+		new("UICorner", { CornerRadius = UDim.new(1, 0) }),
 	})
-	text.Parent = pill
+	dot.Parent = pill
+	local label_ = text({ Text = "Downloader: checking", Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 2 }, 11, "regular", "text")
+	label_.Parent = pill
 	pill.Parent = parent
-	table.insert(pills, { dot = dot, text = text })
+	table.insert(pills, { dot = dot, text = label_, state = nil })
 end
 
 local function setLink(connected)
 	for _, p in ipairs(pills) do
-		if connected then
-			p.dot.BackgroundColor3 = GREEN
-			p.text.Text = "Downloader connected"
-		else
-			p.dot.BackgroundColor3 = GREY
-			p.text.Text = "Downloader not open"
+		if p.state ~= connected then
+			p.state = connected
+			tween(p.dot, { BackgroundColor3 = connected and GREEN or rgb(130, 130, 140) })
+			p.text.Text = connected and "Downloader connected" or "Downloader not open"
 		end
 	end
 end
 
--- Update banner (top of both windows)
+-- Update banner ---------------------------------------------------------
 local banners = {}
 local function makeBanner(root)
 	local b = new("TextLabel", {
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundColor3 = ACCENT,
-		TextColor3 = WHITE,
-		Font = Enum.Font.GothamBold,
-		TextSize = 12,
 		TextWrapped = true,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Visible = false,
 		LayoutOrder = 0,
 		Text = "",
-	}, { corner(8), padding(8, 10, 8, 10) })
+	}, { corner(1), padding(8, 10, 8, 10) })
+	bind(b, "BackgroundColor3", "accent")
+	bind(b, "TextColor3", "accentText")
+	bindText(b, 12, "bold")
 	b.Parent = root
 	table.insert(banners, b)
 end
 
-local function setBanner(text)
+local function setBanner(str)
 	for _, b in ipairs(banners) do
-		b.Text = text or ""
-		b.Visible = text ~= nil
+		if str then
+			b.Text = str
+			if not b.Visible then
+				b.Visible = true
+				b.BackgroundTransparency = 1
+				b.TextTransparency = 1
+				tween(b, { BackgroundTransparency = 0, TextTransparency = 0 }, 2)
+			end
+		else
+			b.Visible = false
+		end
 	end
 end
 
--- true if version a is newer than version b ("3.10" > "3.9")
 local function versionNewer(a, b)
 	local function parts(v)
 		local t = {}
@@ -876,9 +1259,8 @@ local function versionNewer(a, b)
 	return false
 end
 
-local appVersion = nil -- reported by Mesh Downloader
+local appVersion = nil
 local lastUpdateCheck = 0
-
 local function checkForUpdate()
 	lastUpdateCheck = os.time()
 	local latest = nil
@@ -911,31 +1293,119 @@ local function checkForUpdate()
 	end
 end
 
-local function makeWidget(id, title, w, h, dock)
-	local info = DockWidgetPluginGuiInfo.new(dock or Enum.InitialDockState.Right, false, false, w, h, 300, 380)
+-- Windows with tabs ---------------------------------------------------
+local widgets = {}
+local switchTab -- forward
+
+local function makeWidget(id, title, w, h, tabNames)
+	local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, w, h, 300, 400)
 	local widget = plugin:CreateDockWidgetPluginGui(id, info)
 	widget.Title = title
 	widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
 	local root = new("Frame", { Size = UDim2.fromScale(1, 1), BorderSizePixel = 0 }, { padding(10, 10, 10, 10), vlist(8) })
-	theme(root, "BackgroundColor3", C.MainBackground)
+	bind(root, "BackgroundColor3", "bg")
+	local grad = new("UIGradient", { Rotation = 90 })
+	grad.Parent = root
+	gradients[grad] = true
+	applyGradient(grad)
 	root.Parent = widget
+
 	makeBanner(root)
-	return widget, root
+
+	local header = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = 1 })
+	text({ Text = title, Size = UDim2.new(0.6, 0, 1, 0), TextTruncate = Enum.TextTruncate.AtEnd }, 15, "bold", "text").Parent = header
+	makePill(header)
+	header.Parent = root
+
+	-- tab bar with a sliding underline
+	local n = #tabNames
+	local tabBar = new("Frame", { Size = UDim2.new(1, 0, 0, 32), LayoutOrder = 2 }, { corner(1) })
+	bind(tabBar, "BackgroundColor3", "input")
+	stroke().Parent = tabBar
+	tabBar.Parent = root
+	local tabButtons = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1 }, { hlist(0) })
+	tabButtons.Parent = tabBar
+	local indicator = new("Frame", {
+		Size = UDim2.new(1 / n, -16, 0, 3),
+		Position = UDim2.new(0, 8, 1, -4),
+		BorderSizePixel = 0,
+		ZIndex = 2,
+	}, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+	bind(indicator, "BackgroundColor3", "accent")
+	indicator.Parent = tabBar
+
+	local holder = new("Frame", { Size = UDim2.new(1, 0, 0, 200), BackgroundTransparency = 1, LayoutOrder = 3, ClipsDescendants = true })
+	flexFill(holder)
+	holder.Parent = root
+
+	local ctx = {
+		id = id, widget = widget, root = root, holder = holder, pages = {}, tabs = {},
+		tabIndex = {}, tabCount = n, indicator = indicator, current = nil,
+	}
+	for i, name in ipairs(tabNames) do
+		local page = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Visible = false }, { vlist(8) })
+		page.Parent = holder
+		local b = new("TextButton", { Size = UDim2.new(1 / n, 0, 1, 0), BackgroundTransparency = 1, Text = name, LayoutOrder = i })
+		bindText(b, 12, "bold")
+		bind(b, "TextColor3", "dim")
+		b.Parent = tabButtons
+		b.MouseButton1Click:Connect(function()
+			switchTab(ctx, name)
+		end)
+		ctx.pages[name] = page
+		ctx.tabs[name] = b
+		ctx.tabIndex[name] = i
+	end
+	table.insert(widgets, ctx)
+	return ctx
 end
 
--- =================================================================
--- Mini 3D previews (shared by both windows)
--- Hover = bigger, click = keep big, drag = rotate, scroll = zoom.
--- Lighting follows the camera, so whatever side you look at is lit.
--- =================================================================
-local thumbLists = {} -- list ScrollingFrame -> { widget, thumbs }
+switchTab = function(ctx, name, instant)
+	if ctx.current == name then
+		return
+	end
+	for n, page in pairs(ctx.pages) do
+		if n ~= name then
+			page.Visible = false
+		end
+	end
+	local page = ctx.pages[name]
+	page.Visible = true
+	if not instant and animTime() > 0 then
+		page.Position = UDim2.fromOffset(22, 0)
+		tween(page, { Position = UDim2.fromOffset(0, 0) }, 1.3)
+	else
+		page.Position = UDim2.fromOffset(0, 0)
+	end
+	for n, b in pairs(ctx.tabs) do
+		local key = (n == name) and "text" or "dim"
+		regOf(b).props.TextColor3 = key
+		tween(b, { TextColor3 = T(key) })
+	end
+	local idx = ctx.tabIndex[name]
+	local target = UDim2.new((idx - 1) / ctx.tabCount, 8, 1, -4)
+	if instant then
+		ctx.indicator.Position = target
+	else
+		tween(ctx.indicator, { Position = target }, 1.3)
+	end
+	ctx.current = name
+	if ctx.onTab then
+		ctx.onTab(name)
+	end
+end
+
+-------------------------------------------------------------------
+-- 3D previews: small spinning ones on every card + a pop-up that
+-- smoothly grows out of the card you hover / click.
+-------------------------------------------------------------------
+local thumbLists = {} -- list -> { ctx, thumbs }
 local loadingThumbs = 0
 local MAX_LOADING = 2
-local SMALL_THUMB = 48
-local BIG_THUMB = 200
 
-local function registerThumbList(list, widget)
-	thumbLists[list] = { widget = widget, thumbs = {} }
+local function registerThumbList(list, ctx)
+	thumbLists[list] = { ctx = ctx, thumbs = {} }
 end
 
 local function resetThumbs(list)
@@ -955,17 +1425,176 @@ local function stripScripts(inst)
 	end
 end
 
-local function thumbCamera(t)
-	local fov = math.rad(t.cam.FieldOfView)
-	local dist = (t.radius / math.sin(fov / 2)) * t.zoom
-	local rot = CFrame.Angles(0, t.yaw, 0) * CFrame.Angles(-t.pitch, 0, 0)
-	local pos = rot * Vector3.new(0, 0, dist)
-	t.cam.CFrame = CFrame.lookAt(pos, Vector3.zero)
-	t.vp.LightDirection = t.cam.CFrame.LookVector -- "headlight": the side you see is always lit
+local function setupLighting(vp, cam)
+	if S.lighting == "flat" then
+		vp.Ambient = WHITE
+		vp.LightColor = rgb(0, 0, 0)
+	else
+		vp.Ambient = rgb(172, 172, 180)
+		vp.LightColor = rgb(125, 125, 125)
+		vp.LightDirection = cam.CFrame.LookVector
+	end
+end
+
+local function orbitCamera(o)
+	local fov = math.rad(o.cam.FieldOfView)
+	local dist = (o.radius / math.sin(fov / 2)) * o.zoom
+	local rot = CFrame.Angles(0, o.yaw, 0) * CFrame.Angles(-o.pitch, 0, 0)
+	o.cam.CFrame = CFrame.lookAt(rot * Vector3.new(0, 0, dist), Vector3.zero)
+	if S.lighting ~= "flat" then
+		o.vp.LightDirection = o.cam.CFrame.LookVector -- light follows the view: the side you see is lit
+	end
+end
+
+local function newViewport(props)
+	local vp = new("ViewportFrame", props)
+	bind(vp, "BackgroundColor3", "preview")
+	local cam = Instance.new("Camera")
+	cam.FieldOfView = 35
+	cam.Parent = vp
+	vp.CurrentCamera = cam
+	local world = Instance.new("WorldModel")
+	world.Parent = vp
+	setupLighting(vp, cam)
+	return vp, cam, world
+end
+
+local function frameContent(o, holder)
+	local ok, cf, size = pcall(function()
+		return holder:GetBoundingBox()
+	end)
+	if ok and size and size.Magnitude > 0 then
+		holder:TranslateBy(-cf.Position)
+		o.radius = math.max(size.Magnitude / 2, 0.1)
+	else
+		o.radius = 2
+	end
+end
+
+local function attachPop(ctx)
+	local layer = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 40 })
+	layer.Parent = ctx.widget
+	local box = new("Frame", { Visible = false, ZIndex = 41 }, { corner(1.5) })
+	bind(box, "BackgroundColor3", "panel")
+	local st = new("UIStroke", { Thickness = 2 })
+	bind(st, "Color", "accent")
+	st.Parent = box
+	box.Parent = layer
+	local vp, cam, world = newViewport({ Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 1, -38), ZIndex = 42, Active = true })
+	corner(1).Parent = vp
+	vp.Parent = box
+	local title = text({ Position = UDim2.new(0, 10, 1, -30), Size = UDim2.new(1, -130, 0, 26), ZIndex = 42, TextTruncate = Enum.TextTruncate.AtEnd }, 12, "bold", "text")
+	title.Parent = box
+	local hint = text({ AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 1, -30), Size = UDim2.new(0, 120, 0, 26), ZIndex = 42, TextXAlignment = Enum.TextXAlignment.Right }, 10, "regular", "dim")
+	hint.Parent = box
+	local pop = {
+		ctx = ctx, layer = layer, box = box, stroke = st, vp = vp, cam = cam, world = world, title = title, hint = hint,
+		open = false, pinned = false, src = nil, radius = 1, yaw = 0, pitch = 0.35, zoom = 1,
+		dragging = false, moved = 0, last = nil, outside = 0,
+	}
+	local function renderHint()
+		hint.Text = pop.pinned and "kept open - click to let go" or "click to keep open"
+		tween(st, { Thickness = pop.pinned and 3 or 2 })
+	end
+	pop.renderHint = renderHint
+	vp.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			pop.dragging = true
+			pop.last = input.Position
+			pop.moved = 0
+		end
+	end)
+	vp.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			pop.dragging = false
+			if pop.moved <= 4 then
+				pop.pinned = not pop.pinned
+				renderHint()
+			end
+		end
+	end)
+	vp.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement and pop.dragging and pop.last then
+			local d = input.Position - pop.last
+			pop.last = input.Position
+			pop.moved = pop.moved + math.abs(d.X) + math.abs(d.Y)
+			pop.yaw = pop.yaw - d.X * 0.012
+			pop.pitch = math.clamp(pop.pitch + d.Y * 0.012, -1.45, 1.45)
+			orbitCamera(pop)
+		elseif input.UserInputType == Enum.UserInputType.MouseWheel then
+			pop.zoom = math.clamp(pop.zoom * (1 - input.Position.Z * 0.12), 0.15, 6)
+			orbitCamera(pop)
+		end
+	end)
+	ctx.pop = pop
+	return pop
+end
+
+local function openPop(ctx, t, pin)
+	local pop = ctx.pop
+	if not pop or not t.holder or not t.vp.Parent then
+		return
+	end
+	pop.world:ClearAllChildren()
+	local h = t.holder:Clone()
+	h.Parent = pop.world
+	pop.radius, pop.yaw, pop.pitch, pop.zoom = t.radius, t.yaw, t.pitch, 1
+	pop.src = t
+	pop.title.Text = t.title or ""
+	pop.pinned = pin and true or false
+	pop.renderHint()
+	local lp, ls = pop.layer.AbsolutePosition, pop.layer.AbsoluteSize
+	local sp, ss = t.vp.AbsolutePosition - lp, t.vp.AbsoluteSize
+	local big = math.max(120, math.min(S.bigSize, ls.X - 16, ls.Y - 54))
+	local bw, bh = big, big + 32
+	local tx = math.clamp(sp.X + ss.X / 2 - bw / 2, 8, math.max(8, ls.X - bw - 8))
+	local ty = math.clamp(sp.Y + ss.Y / 2 - bh / 2, 8, math.max(8, ls.Y - bh - 8))
+	if not pop.open then
+		pop.box.Position = UDim2.fromOffset(sp.X, sp.Y)
+		pop.box.Size = UDim2.fromOffset(ss.X, ss.Y)
+	end
+	pop.box.Visible = true
+	pop.open = true
+	pop.outside = 0
+	setupLighting(pop.vp, pop.cam)
+	orbitCamera(pop)
+	tween(pop.box, { Position = UDim2.fromOffset(tx, ty), Size = UDim2.fromOffset(bw, bh) }, 1.6)
+end
+
+local function closePop(ctx)
+	local pop = ctx.pop
+	if not pop or not pop.open then
+		return
+	end
+	pop.open = false
+	pop.pinned = false
+	pop.dragging = false
+	local t = pop.src
+	local function hide()
+		if not pop.open then
+			pop.box.Visible = false
+			pop.world:ClearAllChildren()
+		end
+	end
+	if t and t.vp.Parent and t.vp.AbsoluteSize.X > 0 and animTime() > 0 then
+		local sp = t.vp.AbsolutePosition - pop.layer.AbsolutePosition
+		local tw = tween(pop.box, {
+			Position = UDim2.fromOffset(sp.X, sp.Y),
+			Size = UDim2.fromOffset(t.vp.AbsoluteSize.X, t.vp.AbsoluteSize.Y),
+		}, 1.3)
+		if tw then
+			tw.Completed:Connect(hide)
+		else
+			hide()
+		end
+	else
+		hide()
+	end
 end
 
 local function thumbSetContent(t, instances)
 	t.world:ClearAllChildren()
+	t.holder = nil
 	if not instances or #instances == 0 then
 		t.state = "empty"
 		t.note.Text = "no preview"
@@ -977,88 +1606,45 @@ local function thumbSetContent(t, instances)
 		stripScripts(inst)
 		inst.Parent = holder
 	end
+	frameContent(t, holder)
 	holder.Parent = t.world
-	local ok, cf, size = pcall(function()
-		return holder:GetBoundingBox()
-	end)
-	if ok and size and size.Magnitude > 0 then
-		holder:TranslateBy(-cf.Position)
-		t.radius = math.max(size.Magnitude / 2, 0.1)
-	else
-		t.radius = 2
-	end
+	t.holder = holder
 	t.state = "ready"
 	t.note.Visible = false
-	thumbCamera(t)
+	orbitCamera(t)
+	-- fade in
+	if animTime() > 0 then
+		t.vp.ImageTransparency = 1
+		tween(t.vp, { ImageTransparency = 0 }, 2)
+	end
 end
 
-local function makeThumb(list, loader, onResize)
-	local vp = new("ViewportFrame", {
-		BackgroundColor3 = Color3.fromRGB(24, 24, 29),
-		Ambient = Color3.fromRGB(175, 175, 182),
-		LightColor = Color3.fromRGB(120, 120, 120),
-		Active = true,
-		ZIndex = 2,
-	}, { corner(6) })
-	local pinStroke = new("UIStroke", { Thickness = 2, Color = ACCENT, Enabled = false })
-	pinStroke.Parent = vp
-	local cam = Instance.new("Camera")
-	cam.FieldOfView = 35
-	cam.Parent = vp
-	vp.CurrentCamera = cam
-	local world = Instance.new("WorldModel")
-	world.Parent = vp
-	local note = new("TextLabel", {
-		BackgroundTransparency = 1,
-		Size = UDim2.fromScale(1, 1),
-		Font = Enum.Font.Gotham,
-		TextSize = 10,
-		TextWrapped = true,
-		TextColor3 = Color3.fromRGB(120, 120, 130),
-		Text = "...",
-		ZIndex = 3,
-	})
+local function makeThumb(list, o)
+	local entry = thumbLists[list]
+	local vp, cam, world = newViewport({ Active = true, ZIndex = 2 })
+	local note = text({ Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, TextWrapped = true, Text = "...", ZIndex = 3 }, 10, "regular", "dim")
 	note.Parent = vp
-
 	local t = {
-		vp = vp, cam = cam, world = world, note = note, loader = loader, onResize = onResize,
+		vp = vp, cam = cam, world = world, note = note, loader = o.loader, title = o.title, ctx = entry.ctx,
 		state = "idle", radius = 1, yaw = math.random() * math.pi * 2, pitch = 0.35, zoom = 1,
-		hovering = false, dragging = false, big = false, pinned = false, hoverToken = 0, moved = 0, last = nil,
+		hovering = false, dragging = false, hoverToken = 0, moved = 0, last = nil,
 	}
-	local function setBig(b)
-		if t.big == b then
-			return
-		end
-		t.big = b
-		if not b then
-			t.zoom = 1
-		end
-		if t.onResize then
-			t.onResize()
-		end
-		if t.state == "ready" then
-			thumbCamera(t)
-		end
-	end
-	t.setBig = setBig
-
 	vp.MouseEnter:Connect(function()
 		t.hovering = true
 		t.hoverToken = t.hoverToken + 1
 		local tok = t.hoverToken
-		task.delay(0.35, function()
-			if t.hovering and tok == t.hoverToken then
-				setBig(true)
-			end
-		end)
+		if S.hoverEnlarge then
+			task.delay(S.hoverDelay / 10, function()
+				if t.hovering and tok == t.hoverToken and t.holder then
+					openPop(t.ctx, t, false)
+				end
+			end)
+		end
 	end)
 	vp.MouseLeave:Connect(function()
 		t.hovering = false
 		t.dragging = false
 		t.hoverToken = t.hoverToken + 1
-		if not t.pinned then
-			setBig(false)
-		end
 	end)
 	vp.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -1069,40 +1655,31 @@ local function makeThumb(list, loader, onResize)
 	end)
 	vp.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			local wasDrag = t.moved > 4
 			t.dragging = false
-			if not wasDrag then
-				t.pinned = not t.pinned
-				pinStroke.Enabled = t.pinned
-				setBig(t.pinned or t.hovering)
+			if t.moved <= 4 and t.holder then
+				openPop(t.ctx, t, true)
 			end
 		end
 	end)
 	vp.InputChanged:Connect(function(input)
-		if t.state ~= "ready" then
-			return
-		end
-		if input.UserInputType == Enum.UserInputType.MouseMovement and t.dragging and t.last then
+		if t.state == "ready" and input.UserInputType == Enum.UserInputType.MouseMovement and t.dragging and t.last then
 			local d = input.Position - t.last
 			t.last = input.Position
 			t.moved = t.moved + math.abs(d.X) + math.abs(d.Y)
 			t.yaw = t.yaw - d.X * 0.012
 			t.pitch = math.clamp(t.pitch + d.Y * 0.012, -1.45, 1.45)
-			thumbCamera(t)
-		elseif input.UserInputType == Enum.UserInputType.MouseWheel and t.big then
-			t.zoom = math.clamp(t.zoom * (1 - input.Position.Z * 0.12), 0.15, 6)
-			thumbCamera(t)
+			orbitCamera(t)
 		end
 	end)
-
-	table.insert(thumbLists[list].thumbs, t)
+	table.insert(entry.thumbs, t)
 	return t
 end
 
--- Loads previews only for rows you can see, and spins them.
+-- Load previews for cards you can see, spin them, and manage the pop-ups
 RunService.Heartbeat:Connect(function(dt)
+	local spin = S.spin and dt * (S.spinSpeed / 10) or 0
 	for list, entry in pairs(thumbLists) do
-		if entry.widget.Enabled then
+		if entry.ctx.widget.Enabled then
 			local top = list.AbsolutePosition.Y
 			local bottom = top + list.AbsoluteSize.Y
 			for _, t in ipairs(entry.thumbs) do
@@ -1125,280 +1702,329 @@ RunService.Heartbeat:Connect(function(dt)
 								end
 								loadingThumbs = loadingThumbs - 1
 							end)
-						elseif t.state == "ready" and not t.hovering and not t.dragging then
-							t.yaw = t.yaw + dt * 0.8
-							thumbCamera(t)
+						elseif t.state == "ready" and spin > 0 and not t.hovering and not t.dragging then
+							t.yaw = t.yaw + spin
+							orbitCamera(t)
 						end
 					end
 				end
 			end
 		end
 	end
+	for _, ctx in ipairs(widgets) do
+		local pop = ctx.pop
+		if pop and pop.open then
+			if not ctx.widget.Enabled then
+				closePop(ctx)
+			else
+				local m = ctx.widget:GetRelativeMousePosition()
+				local bp = pop.box.AbsolutePosition - pop.layer.AbsolutePosition
+				local bs = pop.box.AbsoluteSize
+				local inside = m.X >= bp.X - 6 and m.X <= bp.X + bs.X + 6 and m.Y >= bp.Y - 6 and m.Y <= bp.Y + bs.Y + 6
+				if inside or pop.pinned or pop.dragging then
+					pop.outside = 0
+				else
+					pop.outside = pop.outside + dt
+					if pop.outside > 0.2 then
+						closePop(ctx)
+					end
+				end
+				if pop.open and spin > 0 and not inside and not pop.dragging then
+					pop.yaw = pop.yaw + spin
+					orbitCamera(pop)
+				end
+			end
+		end
+	end
 end)
 
-local function paintRow(row, isSel)
-	if isSel then
-		row.BackgroundColor3 = ACCENT
-		row.BackgroundTransparency = 0.55
-	else
-		row.BackgroundTransparency = 1
-	end
+-------------------------------------------------------------------
+-- Cards (grid boxes or list rows)
+-------------------------------------------------------------------
+local function cardHeight()
+	local th = textSize(13) + 4
+	local dh = S.showDetails and (textSize(10) + 3) * 2 or 0
+	return 6 + S.cardSize + 6 + th + dh + 6
 end
 
--- A list row with a mini preview on the left, a title and up to 2 lines of info.
--- o = { title, lines, selected, onClick, loader, indent, arrow, onArrow }
-local function thumbRow(list, order, o)
-	local indent = o.indent or 0
+local function listRowHeight()
+	local small = math.floor(S.cardSize * 0.55)
+	local th = textSize(13) + 4
+	local dh = S.showDetails and (textSize(10) + 3) * 2 or 0
+	return math.max(small + 10, 10 + th + dh)
+end
+
+local function cardContainer(list, order)
+	local f = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		LayoutOrder = order,
+	})
+	if S.layout == "grid" then
+		local g = new("UIGridLayout", {
+			CellPadding = UDim2.fromOffset(S.gap, S.gap),
+			CellSize = UDim2.fromOffset(S.cardSize + 12, cardHeight()),
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		})
+		g.Parent = f
+		local function fit()
+			local w = f.AbsoluteSize.X
+			if w <= 0 then
+				return
+			end
+			local minW = S.cardSize + 12
+			local cols = math.max(1, math.floor((w + S.gap) / (minW + S.gap)))
+			local cw = math.floor((w - S.gap * (cols - 1)) / cols)
+			g.CellSize = UDim2.fromOffset(cw, cardHeight())
+		end
+		f:GetPropertyChangedSignal("AbsoluteSize"):Connect(fit)
+		task.defer(fit)
+	else
+		new("UIListLayout", { Padding = UDim.new(0, math.max(2, math.floor(S.gap / 2))), SortOrder = Enum.SortOrder.LayoutOrder }).Parent = f
+	end
+	f.Parent = list
+	return f
+end
+
+-- o = { title, lines, selected, onClick, loader, badge, onBadge }
+local function card(container, list, order, o)
+	local grid = S.layout == "grid"
+	local c = new("TextButton", {
+		Text = "",
+		AutoButtonColor = false,
+		LayoutOrder = order,
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+	}, { corner(1) })
+	bind(c, "BackgroundColor3", "card")
+	local st = new("UIStroke", { Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border })
+	st.Parent = c
+	local function paint(sel, anim)
+		local props = { Color = sel and T("accent") or T("border"), Thickness = sel and 2 or 1 }
+		if anim then
+			tween(st, props)
+		else
+			st.Color = props.Color
+			st.Thickness = props.Thickness
+		end
+	end
+	paint(o.selected, false)
+	if not grid then
+		c.Size = UDim2.new(1, 0, 0, listRowHeight())
+	end
+
+	local t = makeThumb(list, { loader = o.loader, title = o.title })
+	corner(0.75).Parent = t.vp
+	t.vp.Parent = c
+
+	local title = text({ Text = o.title or "", TextTruncate = Enum.TextTruncate.AtEnd }, 13, "bold", "text")
+	title.Parent = c
+	local lines = {}
+	if S.showDetails then
+		for i, line in ipairs(o.lines or {}) do
+			if i > 2 then
+				break
+			end
+			local l = text({ Text = line, TextTruncate = Enum.TextTruncate.AtEnd }, 10, "mono", "dim")
+			l.Parent = c
+			lines[i] = l
+		end
+	end
+	local th, lh = textSize(13) + 4, textSize(10) + 3
+	if grid then
+		t.vp.Position = UDim2.fromOffset(6, 6)
+		t.vp.Size = UDim2.new(1, -12, 0, S.cardSize)
+		title.Position = UDim2.fromOffset(8, S.cardSize + 12)
+		title.Size = UDim2.new(1, -16, 0, th)
+		for i, l in ipairs(lines) do
+			l.Position = UDim2.fromOffset(8, S.cardSize + 12 + th + (i - 1) * lh)
+			l.Size = UDim2.new(1, -16, 0, lh)
+		end
+	else
+		local small = math.floor(S.cardSize * 0.55)
+		t.vp.Position = UDim2.fromOffset(6, 5)
+		t.vp.Size = UDim2.fromOffset(small, small)
+		local x = small + 14
+		title.Position = UDim2.fromOffset(x, 5)
+		title.Size = UDim2.new(1, -(x + 36), 0, th)
+		for i, l in ipairs(lines) do
+			l.Position = UDim2.fromOffset(x, 5 + th + (i - 1) * lh)
+			l.Size = UDim2.new(1, -(x + 8), 0, lh)
+		end
+	end
+
+	if o.badge then
+		local b = new("TextButton", {
+			AnchorPoint = Vector2.new(1, 0),
+			Position = UDim2.new(1, -10, 0, 10),
+			Size = UDim2.fromOffset(24, 24),
+			Text = o.badge,
+			ZIndex = 4,
+			AutoButtonColor = false,
+		}, { new("UICorner", { CornerRadius = UDim.new(1, 0) }) })
+		bind(b, "BackgroundColor3", "accent")
+		bind(b, "TextColor3", "accentText")
+		bindText(b, 15, "bold")
+		pressable(b)
+		b.MouseButton1Click:Connect(o.onBadge)
+		b.Parent = c
+	end
+
+	c.MouseEnter:Connect(function()
+		tween(c, { BackgroundColor3 = T("cardHover") }, 0.6)
+	end)
+	c.MouseLeave:Connect(function()
+		tween(c, { BackgroundColor3 = T("card") }, 0.9)
+	end)
+	local sc = Instance.new("UIScale")
+	sc.Parent = c
+	if animTime() > 0 then
+		sc.Scale = 0.92
+		c.BackgroundTransparency = 1
+		task.delay(math.min(order, 24) * 0.012, function()
+			tween(sc, { Scale = 1 }, 1.5, Enum.EasingStyle.Back)
+			tween(c, { BackgroundTransparency = 0 }, 1.5)
+		end)
+	end
+	c.MouseButton1Click:Connect(o.onClick)
+	c.Parent = container
+	return { frame = c, paint = paint, thumb = t }
+end
+
+-- Full-width header row (optionally with a turning arrow)
+local function groupHeader(list, order, label_, onClick, open)
 	local row = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, 28),
 		AutoButtonColor = false,
 		Text = "",
 		BorderSizePixel = 0,
 		LayoutOrder = order,
-		ClipsDescendants = true,
-		Size = UDim2.new(1, 0, 0, 58),
-	})
-	paintRow(row, o.selected)
-	local x0 = 6 + indent
-	if o.arrow then
-		local a = new("TextButton", {
-			Position = UDim2.fromOffset(x0, 0),
-			Size = UDim2.new(0, 16, 0, 58),
-			BackgroundTransparency = 1,
-			Text = o.arrow,
-			Font = Enum.Font.GothamBold,
-			TextSize = 12,
-			TextColor3 = themeColor(C.DimmedText),
-		})
-		a.Parent = row
-		a.MouseButton1Click:Connect(o.onArrow)
-		x0 = x0 + 18
+	}, { corner(1) })
+	bind(row, "BackgroundColor3", "header")
+	local x = 10
+	local arrow = nil
+	if open ~= nil then
+		arrow = text({ Text = ">", Size = UDim2.fromOffset(14, 28), Position = UDim2.fromOffset(8, 0), TextXAlignment = Enum.TextXAlignment.Center, Rotation = open and 90 or 0 }, 12, "bold", "dim")
+		arrow.Parent = row
+		x = 28
 	end
-	local title = new("TextLabel", {
-		BackgroundTransparency = 1,
-		Font = Enum.Font.GothamMedium,
-		TextSize = 13,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		TextColor3 = themeColor(C.MainText),
-		Text = o.title or "",
-	})
-	title.Parent = row
-	local labels = {}
-	for i, line in ipairs(o.lines or {}) do
-		local l = new("TextLabel", {
-			BackgroundTransparency = 1,
-			Font = Enum.Font.Code,
-			TextSize = 10,
-			TextXAlignment = Enum.TextXAlignment.Left,
-			TextTruncate = Enum.TextTruncate.AtEnd,
-			TextColor3 = themeColor(C.DimmedText),
-			Text = line,
-		})
-		l.Parent = row
-		labels[i] = l
-	end
-	local t
-	local function layout()
-		local textX, textY
-		if t.big then
-			t.vp.Position = UDim2.fromOffset(x0, 6)
-			t.vp.Size = UDim2.new(1, -(x0 + 8), 0, BIG_THUMB)
-			textX, textY = x0, BIG_THUMB + 12
-			row.Size = UDim2.new(1, 0, 0, textY + 18 + #labels * 14 + 6)
+	text({ Text = label_, Position = UDim2.fromOffset(x, 0), Size = UDim2.new(1, -(x + 8), 1, 0), TextTruncate = Enum.TextTruncate.AtEnd }, 12, "bold", "text").Parent = row
+	row.MouseEnter:Connect(function()
+		tween(row, { BackgroundColor3 = T("cardHover") }, 0.6)
+	end)
+	row.MouseLeave:Connect(function()
+		tween(row, { BackgroundColor3 = T("header") }, 0.9)
+	end)
+	row.MouseButton1Click:Connect(function()
+		if arrow then
+			tween(arrow, { Rotation = (arrow.Rotation > 45) and 0 or 90 })
+			task.delay(animTime(0.7), onClick)
 		else
-			t.vp.Position = UDim2.fromOffset(x0, 5)
-			t.vp.Size = UDim2.fromOffset(SMALL_THUMB, SMALL_THUMB)
-			textX, textY = x0 + SMALL_THUMB + 8, 6
-			row.Size = UDim2.new(1, 0, 0, 58)
+			onClick()
 		end
-		title.Position = UDim2.fromOffset(textX, textY)
-		title.Size = UDim2.new(1, -(textX + 8), 0, 18)
-		for i, l in ipairs(labels) do
-			l.Position = UDim2.fromOffset(textX, textY + 18 + (i - 1) * 14)
-			l.Size = UDim2.new(1, -(textX + 8), 0, 14)
-		end
-	end
-	t = makeThumb(list, o.loader, layout)
-	t.vp.Parent = row
-	layout()
-	row.MouseButton1Click:Connect(o.onClick)
-	row.Parent = list
-	return row, t
-end
-
-local function groupHeader(list, order, text, onClick)
-	local row = new("TextButton", {
-		Size = UDim2.new(1, 0, 0, 26),
-		AutoButtonColor = true,
-		Text = "",
-		BorderSizePixel = 0,
-		LayoutOrder = order,
-		BackgroundColor3 = themeColor(C.MainBackground),
-		BackgroundTransparency = 0.3,
-	})
-	new("TextLabel", {
-		BackgroundTransparency = 1,
-		Position = UDim2.fromOffset(8, 0),
-		Size = UDim2.new(1, -16, 1, 0),
-		Font = Enum.Font.GothamBold,
-		TextSize = 12,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		TextColor3 = themeColor(C.MainText),
-		Text = text,
-	}).Parent = row
-	row.MouseButton1Click:Connect(onClick)
+	end)
 	row.Parent = list
 	return row
+end
+
+local function makeNote(parent, str, order)
+	text({ Size = UDim2.new(1, 0, 0, 34), TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Text = str, LayoutOrder = order }, 12, "regular", "dim").Parent = parent
+end
+
+local function clearRows(frame)
+	for _, child in ipairs(frame:GetChildren()) do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+end
+
+local function scrollList(order)
+	local list = new("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 0, 160),
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 6,
+		BorderSizePixel = 0,
+		LayoutOrder = order,
+	}, { corner(1), vlist(8), padding(6, 10, 6, 6) })
+	bind(list, "BackgroundColor3", "panel")
+	bind(list, "ScrollBarImageColor3", "dim")
+	stroke().Parent = list
+	flexFill(list)
+	return list
 end
 
 -- =================================================================
 -- MESH COLLECTOR
 -- =================================================================
-local colWidget, colRoot = makeWidget("MeshCollectorV2", "Mesh Collector", 360, 640)
+local col = makeWidget("MeshCollectorV2", "Mesh Collector  v" .. PLUGIN_VERSION, 380, 700, { "Collector", "Settings" })
+attachPop(col)
+local colPage = col.pages.Collector
 
-local header = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = 1 })
-header.Parent = colRoot
-label({ Text = "Mesh Collector  v" .. PLUGIN_VERSION, Font = Enum.Font.GothamBold, TextSize = 15, Size = UDim2.new(0.6, 0, 1, 0) }).Parent = header
-makePill(header)
+local summary = dimText("Select a model or part in Explorer.", 1)
+summary.Parent = colPage
 
-local summary = dimLabel("Select a model or part in Explorer.", 2)
-summary.Parent = colRoot
+local refresh -- forward
+local refreshInserter -- forward
+local rerenderAll -- forward
 
--- Settings (collapsible)
-local settingsHeader = new("TextButton", {
-	Size = UDim2.new(1, 0, 0, 22),
-	BackgroundTransparency = 1,
-	Text = "",
-	AutoButtonColor = false,
-	LayoutOrder = 3,
-})
-settingsHeader.Parent = colRoot
-local settingsTitle = label({ Text = "", Font = Enum.Font.GothamBold, TextSize = 13, Size = UDim2.fromScale(1, 1) })
-settingsTitle.Parent = settingsHeader
-
-local settingsFrame = new("Frame", {
-	Size = UDim2.new(1, 0, 0, 0),
-	AutomaticSize = Enum.AutomaticSize.Y,
-	BackgroundTransparency = 1,
-	LayoutOrder = 4,
-}, { vlist(6) })
-settingsFrame.Parent = colRoot
-
-local function renderSettingsHeader()
-	settingsTitle.Text = (state.settingsOpen and "v  " or ">  ") .. "Settings"
-	settingsFrame.Visible = state.settingsOpen
-end
-settingsHeader.MouseButton1Click:Connect(function()
-	saveSetting("settingsOpen", not state.settingsOpen)
-	renderSettingsHeader()
-end)
-renderSettingsHeader()
-
-local refresh -- forward declaration (collector list)
-
-dimLabel("Name files by", 1).Parent = settingsFrame
-makeSegmented(2, {
+dimText("Name files by", 2, 11).Parent = colPage
+segmented(3, {
 	{ key = "part", text = "Part" },
 	{ key = "parent", text = "Parent" },
 	{ key = "model", text = "Model" },
 	{ key = "top", text = "Top" },
 	{ key = "custom", text = "Custom" },
-}, function()
-	return state.nameSource
-end, function(v)
-	saveSetting("nameSource", v)
+}, "nameSource", function()
 	refresh()
-end, 11).Parent = settingsFrame
+end, 11).Parent = colPage
 
-local customHolder, customBox = textInput("Custom name (also names saved models)", 3, state.customName)
-customHolder.Parent = settingsFrame
-customBox.FocusLost:Connect(function()
-	saveSetting("customName", clean(customBox.Text))
-	customBox.Text = state.customName
-	refresh()
-end)
+local collectButton = button("Collect current selection", "secondary", 4)
+collectButton.Visible = not S.live
+collectButton.Parent = colPage
 
-makeToggle("Add part name (e.g. AK47_Magazine)", "addPart", 4, function()
-	refresh()
-end).Parent = settingsFrame
-makeToggle("Add mesh ID to file names", "addId", 5, function()
-	refresh()
-end).Parent = settingsFrame
-makeToggle("Folder per model", "folderPerModel", 6, function()
-	refresh()
-end).Parent = settingsFrame
+local listHeader = text({ Text = "Meshes (0)", Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 5 }, 13, "bold", "text")
+listHeader.Parent = colPage
 
-dimLabel("Model pivot (used by Build, Save, Insert and Apply pivots)", 7).Parent = settingsFrame
-makeSegmented(8, {
-	{ key = "keep", text = "Keep" },
-	{ key = "middle", text = "Middle" },
-	{ key = "average", text = "Average" },
-}, function()
-	return state.modelPivot
-end, function(v)
-	saveSetting("modelPivot", v)
-end).Parent = settingsFrame
-makeToggle("Center each part's pivot on itself", "partPivots", 9).Parent = settingsFrame
+local listFrame = scrollList(6)
+listFrame.Parent = colPage
+registerThumbList(listFrame, col)
 
-local collectButton -- shown when Live is off
-makeToggle("Live (follow what I click)", "live", 10, function()
-	collectButton.Visible = not state.live
-	refresh()
-end).Parent = settingsFrame
-makeToggle("Download right away when sent", "autoStart", 11).Parent = settingsFrame
+local sendButton = button("Send to Downloader", "primary", 7)
+sendButton.Parent = colPage
+local buildButton = button("Build local copy (real MeshParts, local .mesh)", "secondary", 8)
+buildButton.Parent = colPage
+local saveModelButton = button("Save model", "secondary")
+local pivotButton = button("Apply pivots", "secondary")
+buttonRow(9, { saveModelButton, pivotButton }).Parent = colPage
+local copyButton = button("Copy list", "secondary")
+local openInserterButton = button("Open Inserter", "secondary")
+buttonRow(10, { copyButton, openInserterButton }).Parent = colPage
 
-collectButton = button("Collect current selection", false, 5)
-collectButton.Visible = not state.live
-collectButton.Parent = colRoot
+local statusLine = dimText("", 11, 11)
+statusLine.Parent = colPage
 
-local listHeader = label({ Text = "Meshes (0)", Font = Enum.Font.GothamBold, Size = UDim2.new(1, 0, 0, 18), LayoutOrder = 6 })
-listHeader.Parent = colRoot
-
-local listFrame = new("ScrollingFrame", {
-	Size = UDim2.new(1, 0, 0, 140),
-	CanvasSize = UDim2.new(0, 0, 0, 0),
-	AutomaticCanvasSize = Enum.AutomaticSize.Y,
-	ScrollBarThickness = 6,
-	BorderSizePixel = 0,
-	LayoutOrder = 7,
-}, { corner(8), vlist(0) })
-theme(listFrame, "BackgroundColor3", C.InputFieldBackground)
-stroke().Parent = listFrame
-pcall(function()
-	new("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }).Parent = listFrame
-end)
-listFrame.Parent = colRoot
-registerThumbList(listFrame, colWidget)
-
-local sendButton = button("Send to Downloader", true, 8)
-sendButton.Parent = colRoot
-local buildButton = button("Build local copy (real MeshParts, local .mesh)", false, 9)
-buildButton.Parent = colRoot
-local saveModelButton = button("Save model", false)
-local pivotButton = button("Apply pivots", false)
-buttonRow(10, { saveModelButton, pivotButton }).Parent = colRoot
-local copyButton = button("Copy list", false)
-local openInserterButton = button("Open Inserter", false)
-buttonRow(11, { copyButton, openInserterButton }).Parent = colRoot
-
-local statusLine = dimLabel("", 12, 11)
-statusLine.Parent = colRoot
-
-local function setStatus(text, color)
-	statusLine.Text = text
-	statusLine.TextColor3 = color or themeColor(C.DimmedText)
+local function setStatus(str, color)
+	statusLine.Text = str
+	regOf(statusLine).props.TextColor3 = nil
+	statusLine.TextColor3 = color or T("dim")
+	if animTime() > 0 and str ~= "" then
+		statusLine.TextTransparency = 1
+		tween(statusLine, { TextTransparency = 0 }, 1.5)
+	end
 end
 
--- Copy overlay
-local overlay = new("Frame", { Size = UDim2.fromScale(1, 1), ZIndex = 10, Visible = false, BorderSizePixel = 0 }, {
+-- Copy panel (fallback when the app link isn't working)
+local overlay = new("Frame", { Size = UDim2.fromScale(1, 1), ZIndex = 30, Visible = false, BorderSizePixel = 0 }, {
 	padding(10, 10, 10, 10),
 	vlist(8),
 })
-theme(overlay, "BackgroundColor3", C.MainBackground)
-overlay.Parent = colWidget
-label({ Text = "Copy list", Font = Enum.Font.GothamBold, TextSize = 15, Size = UDim2.new(1, 0, 0, 22), LayoutOrder = 1 }).Parent = overlay
-dimLabel("The text is selected - press Ctrl+C now, then paste it into Mesh Downloader.", 2, 11).Parent = overlay
+bind(overlay, "BackgroundColor3", "bg")
+overlay.Parent = col.widget
+text({ Text = "Copy list", Size = UDim2.new(1, 0, 0, 22), LayoutOrder = 1 }, 15, "bold", "text").Parent = overlay
+dimText("The text is selected - press Ctrl+C now, then paste it into Mesh Downloader.", 2, 11).Parent = overlay
 local overlayScroll = new("ScrollingFrame", {
 	Size = UDim2.new(1, 0, 0, 200),
 	CanvasSize = UDim2.new(0, 0, 0, 0),
@@ -1406,11 +2032,9 @@ local overlayScroll = new("ScrollingFrame", {
 	ScrollBarThickness = 6,
 	BorderSizePixel = 0,
 	LayoutOrder = 3,
-}, { corner(8) })
-theme(overlayScroll, "BackgroundColor3", C.InputFieldBackground)
-pcall(function()
-	new("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }).Parent = overlayScroll
-end)
+}, { corner(1) })
+bind(overlayScroll, "BackgroundColor3", "input")
+flexFill(overlayScroll)
 overlayScroll.Parent = overlay
 local copyBox = new("TextBox", {
 	Size = UDim2.new(1, -16, 0, 0),
@@ -1423,24 +2047,23 @@ local copyBox = new("TextBox", {
 	TextWrapped = false,
 	TextXAlignment = Enum.TextXAlignment.Left,
 	TextYAlignment = Enum.TextYAlignment.Top,
-	Font = Enum.Font.Code,
-	TextSize = 13,
 	Text = "",
 })
-theme(copyBox, "TextColor3", C.MainText)
+bindText(copyBox, 13, "mono")
+bind(copyBox, "TextColor3", "text")
 copyBox.Parent = overlayScroll
-local closeOverlay = button("Close", true, 4)
+local closeOverlay = button("Close", "primary", 4)
 closeOverlay.Parent = overlay
 closeOverlay.MouseButton1Click:Connect(function()
 	overlay.Visible = false
 end)
 
--- Collecting
+-- Collecting ------------------------------------------------------------
 local frozenSelection = {}
 local currentEntries = {}
-local suppressLiveUntil = 0 -- ignore the selection change we cause by clicking a row
+local suppressLiveUntil = 0
 local colSelected = nil
-local colRows = {} -- part -> row
+local colCards = {} -- part -> card
 
 local function collect(selected)
 	local entries, seen, models = {}, {}, {}
@@ -1475,7 +2098,7 @@ local function collect(selected)
 end
 
 local function fileNameOf(e)
-	if state.addId then
+	if S.addId then
 		return e.name .. "_" .. e.id .. ".mesh"
 	end
 	return e.name .. ".mesh"
@@ -1496,52 +2119,33 @@ local function selectInStudio(inst)
 	suppressLiveUntil = os.clock() + 0.5
 	Selection:Set({ inst })
 	colSelected = inst
-	for owner, row in pairs(colRows) do
-		paintRow(row, owner == inst)
-	end
-end
-
-local function makeNote(parent, text, order)
-	new("TextLabel", {
-		BackgroundTransparency = 1,
-		Size = UDim2.new(1, 0, 0, 36),
-		Font = Enum.Font.GothamMedium,
-		TextSize = 12,
-		TextWrapped = true,
-		TextColor3 = themeColor(C.DimmedText),
-		Text = text,
-		LayoutOrder = order,
-	}).Parent = parent
-end
-
-local function clearRows(frame)
-	for _, child in ipairs(frame:GetChildren()) do
-		if child:IsA("GuiObject") then
-			child:Destroy()
-		end
+	for owner, cd in pairs(colCards) do
+		cd.paint(owner == inst, true)
 	end
 end
 
 refresh = function()
-	if not colWidget.Enabled then
+	if not col.widget.Enabled then
 		return
 	end
+	collectButton.Visible = not S.live
 	local selected
-	if state.live then
+	if S.live then
 		selected = Selection:Get()
 		frozenSelection = selected
 	else
 		selected = frozenSelection
 	end
+	closePop(col)
 	clearRows(listFrame)
 	resetThumbs(listFrame)
-	colRows = {}
+	colCards = {}
 	local entries, modelCount = collect(selected)
 	currentEntries = entries
 	listHeader.Text = string.format("Meshes (%d)", #entries)
 
 	if #selected == 0 then
-		summary.Text = state.live and "Click a model or part in Explorer or the viewport."
+		summary.Text = S.live and "Click a model or part in Explorer or the viewport."
 			or "Live is off - select something, then press Collect current selection."
 		makeNote(listFrame, "Nothing selected", 1)
 		return
@@ -1554,7 +2158,6 @@ refresh = function()
 		return
 	end
 
-	-- group the meshes under the model they belong to
 	local groups, groupOrder = {}, {}
 	for _, e in ipairs(entries) do
 		local key = e.model or "none"
@@ -1568,8 +2171,8 @@ refresh = function()
 	local order, shown = 0, 0
 	for _, key in ipairs(groupOrder) do
 		local g = groups[key]
-		order = order + 1
 		local n = #g.list
+		order = order + 1
 		local headerText
 		if g.model then
 			headerText = string.format("%s  (%d mesh%s)  - click to select", g.model.Name, n, n == 1 and "" or "es")
@@ -1581,20 +2184,19 @@ refresh = function()
 				selectInStudio(g.model)
 			end
 		end)
-		for _, e in ipairs(g.list) do
+		order = order + 1
+		local cont = cardContainer(listFrame, order)
+		for i, e in ipairs(g.list) do
 			shown = shown + 1
-			order = order + 1
-			if shown > MAX_ROWS then
-				makeNote(listFrame, string.format("...and %d more (all will be sent)", #entries - MAX_ROWS), order)
+			if shown > S.maxItems then
 				break
 			end
-			local lines = {
-				e.id .. "  -  " .. partSizeText(e.owner) .. "  -  " .. e.owner.ClassName,
-				e.folder and ("saves to " .. e.folder .. "/") or e.owner:GetFullName(),
-			}
-			local row = thumbRow(listFrame, order, {
+			local cd = card(cont, listFrame, i, {
 				title = fileNameOf(e),
-				lines = lines,
+				lines = {
+					e.id .. "  -  " .. e.owner.ClassName,
+					partSizeText(e.owner) .. (e.folder and ("  ->  " .. e.folder .. "/") or ""),
+				},
 				selected = (colSelected == e.owner),
 				onClick = function()
 					selectInStudio(e.owner)
@@ -1606,9 +2208,11 @@ refresh = function()
 					cb((ok and c) and { c } or nil)
 				end,
 			})
-			colRows[e.owner] = row
+			colCards[e.owner] = cd
 		end
-		if shown > MAX_ROWS then
+		if shown > S.maxItems then
+			order = order + 1
+			makeNote(listFrame, string.format("...and %d more (all will be sent). Raise 'Max items' in Settings to see them.", #entries - S.maxItems), order)
 			break
 		end
 	end
@@ -1630,16 +2234,13 @@ local function listText()
 	local lines = {}
 	for _, e in ipairs(currentEntries) do
 		local line = e.id .. " | " .. e.name .. " | " .. (e.folder or "")
-		if not state.addId then
+		if not S.addId then
 			line = line .. " | noid"
 		end
 		table.insert(lines, line)
 	end
 	return table.concat(lines, "\n")
 end
-
--- Actions -----------------------------------------------------------
-local refreshInserter -- forward declaration
 
 sendButton.MouseButton1Click:Connect(function()
 	if #currentEntries == 0 then
@@ -1648,13 +2249,13 @@ sendButton.MouseButton1Click:Connect(function()
 	end
 	local items = {}
 	for _, e in ipairs(currentEntries) do
-		table.insert(items, { id = e.id, name = e.name, folder = e.folder, noId = not state.addId })
+		table.insert(items, { id = e.id, name = e.name, folder = e.folder, noId = not S.addId })
 	end
 	setStatus("Sending...", nil)
-	local ok = request("POST", "/queue", HttpService:JSONEncode({ autoStart = state.autoStart, items = items }))
+	local ok = request("POST", "/queue", HttpService:JSONEncode({ autoStart = S.autoStart, items = items }))
 	setLink(ok)
 	if ok then
-		local verb = state.autoStart and "Downloading" or "Queued"
+		local verb = S.autoStart and "Downloading" or "Queued"
 		setStatus(string.format("%s %d mesh(es) in Mesh Downloader.", verb, #items), GREEN)
 	else
 		setStatus("Couldn't reach Mesh Downloader. Make sure it's open with 'Listen for Studio plugin' on.", RED)
@@ -1723,7 +2324,7 @@ pivotButton.MouseButton1Click:Connect(function()
 		setStatus("Select a model or part first.", RED)
 		return
 	end
-	if state.modelPivot == "keep" and not state.partPivots then
+	if S.modelPivot == "keep" and not S.partPivots then
 		setStatus("Pick Middle or Average under Model pivot (or turn on 'Center each part's pivot') first.", RED)
 		return
 	end
@@ -1920,92 +2521,91 @@ local function buildLocal()
 	end
 end
 buildButton.MouseButton1Click:Connect(buildLocal)
-
-collectButton.MouseButton1Click:Connect(function()
-	frozenSelection = Selection:Get()
-	refresh()
-end)
-
-Selection.SelectionChanged:Connect(function()
-	if os.clock() < suppressLiveUntil then
-		return
-	end
-	if state.live and colWidget.Enabled then
-		queueRefresh()
-	end
-end)
-
 -- =================================================================
 -- MESH INSERTER
 -- =================================================================
-local insWidget, insRoot = makeWidget("MeshInserterV3", "Mesh Inserter", 380, 700)
+local ins = makeWidget("MeshInserterV3", "Mesh Inserter", 400, 720, { "Library", "Settings" })
+attachPop(ins)
+local insPage = ins.pages.Library
 
-local insHeader = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = 1 })
-insHeader.Parent = insRoot
-label({ Text = "Mesh Inserter", Font = Enum.Font.GothamBold, TextSize = 15, Size = UDim2.new(0.5, 0, 1, 0) }).Parent = insHeader
-makePill(insHeader)
-
-local searchHolder, searchBox = textInput("Search meshes and models...", 2)
-local refreshLibButton = button("Refresh", false)
-refreshLibButton.TextSize = 12
-local searchRow = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = 2 }, { hlist(6) })
+local searchHolder, searchBox = textInput("Search meshes and models...", 1)
+local refreshLibButton = button("Refresh", "secondary")
+local searchRow = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = 1 }, { hlist(6) })
 searchHolder.Size = UDim2.new(1, -86, 1, 0)
 searchHolder.LayoutOrder = 1
 searchHolder.Parent = searchRow
 refreshLibButton.Size = UDim2.new(0, 80, 1, 0)
 refreshLibButton.LayoutOrder = 2
 refreshLibButton.Parent = searchRow
-searchRow.Parent = insRoot
+searchRow.Parent = insPage
 
-dimLabel("Hover a preview to enlarge it, click it to keep it big, drag to rotate, scroll to zoom.", 3, 11).Parent = insRoot
+local insList = scrollList(4)
+insList.Parent = insPage
+registerThumbList(insList, ins)
 
-local insList = new("ScrollingFrame", {
-	Size = UDim2.new(1, 0, 0, 200),
-	CanvasSize = UDim2.new(0, 0, 0, 0),
-	AutomaticCanvasSize = Enum.AutomaticSize.Y,
-	ScrollBarThickness = 6,
-	BorderSizePixel = 0,
-	LayoutOrder = 4,
-}, { corner(8), vlist(0) })
-theme(insList, "BackgroundColor3", C.InputFieldBackground)
-stroke().Parent = insList
-pcall(function()
-	new("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }).Parent = insList
-end)
-insList.Parent = insRoot
-registerThumbList(insList, insWidget)
-
-local infoLabel = label({
-	Text = "Pick a mesh or model to see its details.",
+-- details + buttons (can sit above or below the list - see Settings)
+local infoBlock = new("Frame", {
+	Size = UDim2.new(1, 0, 0, 0),
+	AutomaticSize = Enum.AutomaticSize.Y,
+	BackgroundTransparency = 1,
+	LayoutOrder = 5,
+}, { vlist(8) })
+infoBlock.Parent = insPage
+local infoCard = new("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, LayoutOrder = 1 }, {
+	corner(1),
+	padding(8, 10, 8, 10),
+})
+bind(infoCard, "BackgroundColor3", "panel")
+stroke().Parent = infoCard
+infoCard.Parent = infoBlock
+local infoLabel = text({
+	Text = "Click a card's name to see its details here.",
 	RichText = true,
-	TextSize = 12,
 	TextWrapped = true,
 	TextYAlignment = Enum.TextYAlignment.Top,
 	Size = UDim2.new(1, 0, 0, 0),
 	AutomaticSize = Enum.AutomaticSize.Y,
-	LayoutOrder = 5,
-})
-infoLabel.Parent = insRoot
+}, 12, "regular", "text")
+infoLabel.Parent = infoCard
 
-local insertButton = button("Insert", true)
-local revealButton = button("Show in folder", false)
-buttonRow(6, { insertButton, revealButton }).Parent = insRoot
-local insStatus = dimLabel("", 7, 11)
-insStatus.Parent = insRoot
-local function setInsStatus(text, color)
-	insStatus.Text = text
-	insStatus.TextColor3 = color or themeColor(C.DimmedText)
+local insertButton = button("Insert", "primary")
+local revealButton = button("Show in folder", "secondary")
+buttonRow(2, { insertButton, revealButton }).Parent = infoBlock
+local insStatus = dimText("", 3, 11)
+insStatus.Parent = infoBlock
+
+local function setInsStatus(str, color)
+	insStatus.Text = str
+	regOf(insStatus).props.TextColor3 = nil
+	insStatus.TextColor3 = color or T("dim")
+	if animTime() > 0 and str ~= "" then
+		insStatus.TextTransparency = 1
+		tween(insStatus, { TextTransparency = 0 }, 1.5)
+	end
 end
 
--- Library data ----------------------------------------------------------
+local function applyInfoPos()
+	infoBlock.LayoutOrder = (S.infoPos == "top") and 2 or 5
+end
+applyInfoPos()
+
+local function setInfo(str)
+	infoLabel.Text = str
+	if animTime() > 0 then
+		infoLabel.TextTransparency = 1
+		tween(infoLabel, { TextTransparency = 0 }, 1.2)
+	end
+end
+
+-- Library state ------------------------------------------------------------
 local lib = { meshes = {}, models = {}, loaded = false }
 local sectionOpen = { models = true, meshes = true }
 local expanded = {}
-local modelCache = {} -- key -> { loading, waiters, err, roots, parts, partCount, date }
-local meshTemplates = {} -- id -> MeshPart
+local modelCache = {}
+local meshTemplates = {}
 local selected = nil
 local selectToken = 0
-local insRows = {} -- item/part table -> row
+local insCards = {} -- item/part table -> card
 local renderInserter -- forward
 
 local function fmtBytes(n)
@@ -2162,7 +2762,7 @@ end
 local function showMeshInfo(m)
 	local bones = tonumber(m.bones) or 0
 	local boneText = bones > 0 and string.format("<b>SKINNED</b> - %d bones", bones) or (bones < 0 and "skinned" or "no bones")
-	infoLabel.Text = string.format(
+	setInfo(string.format(
 		"<b>%s</b>\nMesh  -  ID %s  -  %s\n%s verts  -  %s tris  -  %s\nSize %s studs  -  %s  -  %s",
 		escapeRich(m.name),
 		escapeRich(m.id),
@@ -2173,7 +2773,7 @@ local function showMeshInfo(m)
 		fmtSize(m.size),
 		fmtBytes(m.bytes),
 		escapeRich(m.date or "")
-	)
+	))
 end
 
 local function showModelInfo(m, entry)
@@ -2183,7 +2783,7 @@ local function showModelInfo(m, entry)
 	elseif entry and entry.roots then
 		extra = string.format("%d object(s) at top  -  %d parts  -  %d meshes", #entry.roots, entry.partCount or 0, #(entry.parts or {}))
 	end
-	infoLabel.Text = string.format(
+	setInfo(string.format(
 		"<b>%s</b>\nModel  -  %s  -  %s  -  %s\nFolder: %s\n%s",
 		escapeRich(m.name),
 		escapeRich(m.ext or ""),
@@ -2191,13 +2791,13 @@ local function showModelInfo(m, entry)
 		escapeRich(m.date or ""),
 		escapeRich((m.folder and m.folder ~= "") and m.folder or "(save folder)"),
 		escapeRich(extra)
-	)
+	))
 end
 
 local function showPartInfo(m, p)
 	local inst = p.inst
 	local size = inst.Size
-	infoLabel.Text = string.format(
+	setInfo(string.format(
 		"<b>%s</b>\nPart in %s  -  mesh ID %s\n%s\nSize %.2f x %.2f x %.2f studs  -  %s",
 		escapeRich(p.name),
 		escapeRich(m.name),
@@ -2207,13 +2807,14 @@ local function showPartInfo(m, p)
 		size.Y,
 		size.Z,
 		inst.ClassName
-	)
+	))
 end
+
 
 local function updateInsHighlights()
 	local key = selected and (selected.kind == "part" and selected.part or selected.item) or nil
-	for k, row in pairs(insRows) do
-		paintRow(row, k == key)
+	for k, cd in pairs(insCards) do
+		cd.paint(k == key, true)
 	end
 end
 
@@ -2244,27 +2845,21 @@ local function selectPart(m, p)
 	updateInsHighlights()
 end
 
-local function sectionRow(order, key, title)
-	groupHeader(insList, order, (sectionOpen[key] and "v  " or ">  ") .. title, function()
-		sectionOpen[key] = not sectionOpen[key]
-		renderInserter()
-	end)
-end
-
-local function matches(text, filter)
+local function matches(str, filter)
 	if filter == "" then
 		return true
 	end
-	return string.find(string.lower(tostring(text or "")), filter, 1, true) ~= nil
+	return string.find(string.lower(tostring(str or "")), filter, 1, true) ~= nil
 end
 
 renderInserter = function()
-	if not insWidget.Enabled then
+	if not ins.widget.Enabled then
 		return
 	end
+	closePop(ins)
 	clearRows(insList)
 	resetThumbs(insList)
-	insRows = {}
+	insCards = {}
 	local filter = string.lower(clean(searchBox.Text))
 	local order = 0
 	local function nextOrder()
@@ -2277,7 +2872,7 @@ renderInserter = function()
 		return
 	end
 
-	-- Models
+	-- MODELS -------------------------------------------------------------
 	local models = {}
 	for _, m in ipairs(lib.models) do
 		local cache = modelCache[m.key]
@@ -2294,49 +2889,65 @@ renderInserter = function()
 			table.insert(models, m)
 		end
 	end
-	sectionRow(nextOrder(), "models", string.format("MODELS (%d)", #models))
+	groupHeader(insList, nextOrder(), string.format("MODELS  (%d)", #models), function()
+		sectionOpen.models = not sectionOpen.models
+		renderInserter()
+	end, sectionOpen.models)
 	if sectionOpen.models then
 		if #models == 0 then
 			makeNote(insList, "No saved or downloaded models yet.", nextOrder())
-		end
-		for _, m in ipairs(models) do
-			local isOpen = expanded[m.key]
-			local cache = modelCache[m.key]
-			local detail = "click the arrow to see its meshes"
-			if cache and cache.roots then
-				detail = string.format("%d parts  -  %d meshes", cache.partCount or 0, #(cache.parts or {}))
-			elseif cache and cache.err then
-				detail = cache.err
+		else
+			local cont = cardContainer(insList, nextOrder())
+			for i, m in ipairs(models) do
+				if i > S.maxItems then
+					break
+				end
+				local cache = modelCache[m.key]
+				local detail = "press + to see its meshes"
+				if cache and cache.roots then
+					detail = string.format("%d parts  -  %d meshes", cache.partCount or 0, #(cache.parts or {}))
+				elseif cache and cache.err then
+					detail = "can't preview (see details)"
+				end
+				local cd = card(cont, insList, i, {
+					title = m.name,
+					lines = { fmtBytes(m.bytes) .. "  -  " .. (m.date or ""), detail },
+					selected = selected and selected.kind == "model" and selected.item == m,
+					onClick = function()
+						selectModel(m)
+					end,
+					loader = function(cb)
+						local entry = waitModel(m)
+						if entry and entry.roots then
+							cb(cloneAll(entry.roots))
+						else
+							cb(nil)
+						end
+					end,
+					badge = expanded[m.key] and "-" or "+",
+					onBadge = function()
+						expanded[m.key] = not expanded[m.key]
+						if expanded[m.key] then
+							loadModel(m, function()
+								renderInserter()
+							end)
+						end
+						renderInserter()
+					end,
+				})
+				insCards[m] = cd
 			end
-			local folderText = (m.folder ~= nil and m.folder ~= "") and (m.folder .. "  -  ") or ""
-			local row = thumbRow(insList, nextOrder(), {
-				title = m.name,
-				lines = { folderText .. fmtBytes(m.bytes) .. "  -  " .. (m.date or ""), detail },
-				selected = selected and selected.kind == "model" and selected.item == m,
-				onClick = function()
-					selectModel(m)
-				end,
-				loader = function(cb)
-					local entry = waitModel(m)
-					if entry and entry.roots then
-						cb(cloneAll(entry.roots))
-					else
-						cb(nil)
-					end
-				end,
-				arrow = isOpen and "v" or ">",
-				onArrow = function()
-					expanded[m.key] = not expanded[m.key]
-					if expanded[m.key] then
-						loadModel(m, function()
-							renderInserter()
-						end)
-					end
+		end
+
+		-- expanded models: their meshes
+		for _, m in ipairs(models) do
+			if expanded[m.key] then
+				local cache = modelCache[m.key]
+				local count = (cache and cache.parts) and #cache.parts or 0
+				groupHeader(insList, nextOrder(), string.format("%s  -  meshes (%d)   [click to close]", m.name, count), function()
+					expanded[m.key] = nil
 					renderInserter()
-				end,
-			})
-			insRows[m] = row
-			if isOpen then
+				end)
 				if not cache or cache.loading then
 					makeNote(insList, "Loading...", nextOrder())
 				elseif cache.err then
@@ -2344,18 +2955,17 @@ renderInserter = function()
 				elseif #cache.parts == 0 then
 					makeNote(insList, "No meshes in this model.", nextOrder())
 				else
+					local cont = cardContainer(insList, nextOrder())
 					local shown = 0
 					for _, p in ipairs(cache.parts) do
 						if filter == "" or matches(m.name, filter) or matches(p.name, filter) or matches(p.id, filter) then
 							shown = shown + 1
-							if shown > MAX_ROWS then
-								makeNote(insList, "...more parts hidden - use Search to narrow it down.", nextOrder())
+							if shown > S.maxItems then
 								break
 							end
-							local prow = thumbRow(insList, nextOrder(), {
+							local cd = card(cont, insList, shown, {
 								title = p.name,
 								lines = { p.id .. "  -  " .. p.inst.ClassName, p.path },
-								indent = 24,
 								selected = selected and selected.kind == "part" and selected.part == p,
 								onClick = function()
 									selectPart(m, p)
@@ -2364,7 +2974,7 @@ renderInserter = function()
 									cb(cloneAll({ p.inst }))
 								end,
 							})
-							insRows[p] = prow
+							insCards[p] = cd
 						end
 					end
 				end
@@ -2372,40 +2982,45 @@ renderInserter = function()
 		end
 	end
 
-	-- Meshes
+	-- MESHES -------------------------------------------------------------
 	local meshes = {}
 	for _, m in ipairs(lib.meshes) do
 		if matches(m.name, filter) or matches(m.id, filter) then
 			table.insert(meshes, m)
 		end
 	end
-	sectionRow(nextOrder(), "meshes", string.format("MESHES (%d)", #meshes))
+	groupHeader(insList, nextOrder(), string.format("MESHES  (%d)", #meshes), function()
+		sectionOpen.meshes = not sectionOpen.meshes
+		renderInserter()
+	end, sectionOpen.meshes)
 	if sectionOpen.meshes then
 		if #meshes == 0 then
 			makeNote(insList, "No downloaded meshes yet.", nextOrder())
-		end
-		for i, m in ipairs(meshes) do
-			if i > MAX_ROWS then
-				makeNote(insList, string.format("...and %d more - use Search to narrow it down.", #meshes - MAX_ROWS), nextOrder())
-				break
+		else
+			local cont = cardContainer(insList, nextOrder())
+			for i, m in ipairs(meshes) do
+				if i > S.maxItems then
+					makeNote(insList, string.format("...and %d more - search, or raise 'Max items' in Settings.", #meshes - S.maxItems), nextOrder())
+					break
+				end
+				local bones = tonumber(m.bones) or 0
+				local cd = card(cont, insList, i, {
+					title = m.name,
+					lines = {
+						m.id .. "  -  " .. tostring(m.tris or "?") .. " tris" .. (bones ~= 0 and "  -  skinned" or ""),
+						fmtSize(m.size) .. " studs  -  " .. fmtBytes(m.bytes),
+					},
+					selected = selected and selected.kind == "mesh" and selected.item == m,
+					onClick = function()
+						selectMesh(m)
+					end,
+					loader = function(cb)
+						local tpl = getMeshTemplate(m.id)
+						cb(tpl and { tpl:Clone() } or nil)
+					end,
+				})
+				insCards[m] = cd
 			end
-			local bones = tonumber(m.bones) or 0
-			local row = thumbRow(insList, nextOrder(), {
-				title = m.name,
-				lines = {
-					m.id .. "  -  " .. tostring(m.tris or "?") .. " tris" .. (bones ~= 0 and "  -  skinned" or ""),
-					fmtSize(m.size) .. " studs  -  " .. fmtBytes(m.bytes),
-				},
-				selected = selected and selected.kind == "mesh" and selected.item == m,
-				onClick = function()
-					selectMesh(m)
-				end,
-				loader = function(cb)
-					local tpl = getMeshTemplate(m.id)
-					cb(tpl and { tpl:Clone() } or nil)
-				end,
-			})
-			insRows[m] = row
 		end
 	end
 end
@@ -2444,7 +3059,7 @@ refreshInserter = function()
 				selected.item = found
 			else
 				selected = nil
-				infoLabel.Text = "Pick a mesh or model to see its details."
+				setInfo("Click a card's name to see its details here.")
 			end
 		end
 		setInsStatus(string.format("%d model(s), %d mesh(es) in your library.", #lib.models, #lib.meshes), nil)
@@ -2551,48 +3166,233 @@ revealButton.MouseButton1Click:Connect(function()
 end)
 
 -- =================================================================
+-- SETTINGS TAB (same settings in both windows)
+-- =================================================================
+rerenderAll = function()
+	collectButton.Visible = not S.live
+	applyInfoPos()
+	refresh()
+	renderInserter()
+end
+
+local customBoxes = {}
+local function px(v)
+	return v .. " px"
+end
+
+local NAME_OPTIONS = {
+	{ key = "part", text = "Part" },
+	{ key = "parent", text = "Parent" },
+	{ key = "model", text = "Model" },
+	{ key = "top", text = "Top" },
+	{ key = "custom", text = "Custom" },
+}
+
+local function buildSettingsPage(ctx)
+	local page = ctx.pages.Settings
+	local sf = new("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 1, 0),
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 6,
+		BorderSizePixel = 0,
+		BackgroundTransparency = 1,
+		LayoutOrder = 1,
+	}, { vlist(6), padding(0, 12, 14, 2) })
+	bind(sf, "ScrollBarImageColor3", "dim")
+	flexFill(sf)
+	sf.Parent = page
+
+	local o = 0
+	local function nx()
+		o = o + 1
+		return o
+	end
+	local function add(inst)
+		inst.Parent = sf
+		return inst
+	end
+	local function appearance()
+		applyAppearance(true)
+		rerenderAll()
+	end
+
+	add(sectionTitle("Appearance", nx()))
+	add(dimText("Theme", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "studio", text = "Studio" },
+		{ key = "dark", text = "Dark" },
+		{ key = "classic", text = "Classic" },
+		{ key = "midnight", text = "Midnight" },
+	}, "theme", appearance))
+	add(dimText("Accent colour", nx(), 11))
+	add(swatches(nx(), appearance))
+	add(dimText("Font", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "gotham", text = "Gotham" },
+		{ key = "sourcesans", text = "Source Sans" },
+		{ key = "arial", text = "Arial" },
+	}, "font", appearance))
+	add(stepper("Text size", "textScale", nx(), 80, 130, 5, function(v)
+		return v .. "%"
+	end, appearance))
+	add(stepper("Corner roundness", "corner", nx(), 0, 16, 2, px, appearance))
+	add(dimText("Animations", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "off", text = "Off" },
+		{ key = "fast", text = "Fast" },
+		{ key = "normal", text = "Normal" },
+		{ key = "slow", text = "Slow" },
+	}, "anim"))
+
+	add(sectionTitle("Layout", nx()))
+	add(segmented(nx(), {
+		{ key = "grid", text = "Grid (boxes)" },
+		{ key = "list", text = "List (rows)" },
+	}, "layout", rerenderAll))
+	add(stepper("Card / preview size", "cardSize", nx(), 64, 200, 8, px, rerenderAll))
+	add(stepper("Space between cards", "gap", nx(), 2, 24, 2, px, rerenderAll))
+	add(toggle("Show details on cards", "showDetails", nx(), rerenderAll))
+	add(stepper("Max items shown", "maxItems", nx(), 50, 2000, 50, tostring, rerenderAll))
+	add(dimText("Inserter details panel", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "top", text = "Above the list" },
+		{ key = "bottom", text = "Below the list" },
+	}, "infoPos", applyInfoPos))
+
+	add(sectionTitle("3D previews", nx()))
+	add(toggle("Spin previews", "spin", nx()))
+	add(stepper("Spin speed", "spinSpeed", nx(), 2, 30, 2, function(v)
+		return string.format("%.1fx", v / 10)
+	end))
+	add(toggle("Grow into a big preview on hover", "hoverEnlarge", nx()))
+	add(stepper("Hover delay", "hoverDelay", nx(), 0, 15, 1, function(v)
+		return string.format("%.1f s", v / 10)
+	end))
+	add(stepper("Big preview size", "bigSize", nx(), 140, 480, 20, px))
+	add(dimText("Lighting", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "follow", text = "Follows view" },
+		{ key = "flat", text = "Flat (no shading)" },
+	}, "lighting", rerenderAll))
+
+	add(sectionTitle("Naming & saving", nx()))
+	add(dimText("Name files by", nx(), 11))
+	add(segmented(nx(), NAME_OPTIONS, "nameSource", rerenderAll, 11))
+	local holder, box = textInput("Custom name (also names saved models)", nx(), S.customName)
+	add(holder)
+	table.insert(customBoxes, box)
+	box.FocusLost:Connect(function()
+		save("customName", clean(box.Text))
+		for _, b in ipairs(customBoxes) do
+			b.Text = S.customName
+		end
+		rerenderAll()
+	end)
+	add(toggle("Add part name (e.g. AK47_Magazine)", "addPart", nx(), rerenderAll))
+	add(toggle("Add mesh ID to file names", "addId", nx(), rerenderAll))
+	add(toggle("Folder per model", "folderPerModel", nx(), rerenderAll))
+
+	add(sectionTitle("Pivots", nx()))
+	add(dimText("Model pivot (used by Build, Save, Insert and Apply pivots)", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "keep", text = "Keep" },
+		{ key = "middle", text = "Middle" },
+		{ key = "average", text = "Average" },
+	}, "modelPivot"))
+	add(dimText("Middle = centre of the box around the whole model (halfway between its farthest edges). Average = average position of all its parts, so it leans toward where most parts are.", nx(), 11))
+	add(toggle("Center each part's pivot on itself", "partPivots", nx()))
+
+	add(sectionTitle("Collector", nx()))
+	add(toggle("Live (follow what I click)", "live", nx(), rerenderAll))
+	add(toggle("Download right away when sent", "autoStart", nx()))
+
+	add(sectionTitle("Reset", nx()))
+	local reset = add(button("Reset all settings to default", "secondary", nx()))
+	reset.MouseButton1Click:Connect(function()
+		for k, d in pairs(DEFAULTS) do
+			save(k, d)
+		end
+		for _, b in ipairs(customBoxes) do
+			b.Text = ""
+		end
+		applyAppearance(true)
+		syncControls(true)
+		rerenderAll()
+	end)
+	add(dimText("Mesh Tools v" .. PLUGIN_VERSION, nx(), 10))
+end
+
+buildSettingsPage(col)
+buildSettingsPage(ins)
+
+-- =================================================================
 -- Wiring
 -- =================================================================
-collectorButton.Click:Connect(function()
-	colWidget.Enabled = not colWidget.Enabled
-end)
-inserterButton.Click:Connect(function()
-	insWidget.Enabled = not insWidget.Enabled
-end)
-openInserterButton.MouseButton1Click:Connect(function()
-	insWidget.Enabled = true
+collectButton.MouseButton1Click:Connect(function()
+	frozenSelection = Selection:Get()
+	refresh()
 end)
 
-colWidget:GetPropertyChangedSignal("Enabled"):Connect(function()
-	collectorButton:SetActive(colWidget.Enabled)
-	if colWidget.Enabled then
+Selection.SelectionChanged:Connect(function()
+	if os.clock() < suppressLiveUntil then
+		return
+	end
+	if S.live and col.widget.Enabled and col.current == "Collector" then
+		queueRefresh()
+	end
+end)
+
+collectorButton.Click:Connect(function()
+	col.widget.Enabled = not col.widget.Enabled
+end)
+inserterButton.Click:Connect(function()
+	ins.widget.Enabled = not ins.widget.Enabled
+end)
+openInserterButton.MouseButton1Click:Connect(function()
+	ins.widget.Enabled = true
+	switchTab(ins, "Library")
+end)
+
+col.onTab = function(name)
+	if name == "Collector" then
+		refresh()
+	else
+		closePop(col)
+	end
+end
+ins.onTab = function(name)
+	if name == "Library" then
+		renderInserter()
+	else
+		closePop(ins)
+	end
+end
+
+col.widget:GetPropertyChangedSignal("Enabled"):Connect(function()
+	collectorButton:SetActive(col.widget.Enabled)
+	if col.widget.Enabled then
 		refresh()
 	end
 end)
-insWidget:GetPropertyChangedSignal("Enabled"):Connect(function()
-	inserterButton:SetActive(insWidget.Enabled)
-	if insWidget.Enabled then
+ins.widget:GetPropertyChangedSignal("Enabled"):Connect(function()
+	inserterButton:SetActive(ins.widget.Enabled)
+	if ins.widget.Enabled then
 		refreshInserter()
 	end
 end)
 
 Studio.ThemeChanged:Connect(function()
-	for _, t in ipairs(themed) do
-		pcall(function()
-			t[1][t[2]] = themeColor(t[3])
-		end)
+	if S.theme == "studio" then
+		applyAppearance(true)
+		rerenderAll()
 	end
-	for _, r in ipairs(renderers) do
-		r()
-	end
-	refresh()
-	renderInserter()
 end)
 
--- Downloader status (only while a window is open)
+-- Downloader status + update check (only while a window is open)
 task.spawn(function()
 	while alive do
-		if colWidget.Enabled or insWidget.Enabled then
+		if col.widget.Enabled or ins.widget.Enabled then
 			local ok, res = request("GET", "/ping")
 			setLink(ok)
 			if ok then
@@ -2601,7 +3401,6 @@ task.spawn(function()
 					appVersion = tostring(d.version)
 				end
 			end
-			-- check GitHub when a window opens, then every 30 minutes
 			if os.time() - lastUpdateCheck > 1800 then
 				checkForUpdate()
 			end
@@ -2610,9 +3409,11 @@ task.spawn(function()
 	end
 end)
 
-collectorButton:SetActive(colWidget.Enabled)
-inserterButton:SetActive(insWidget.Enabled)
+switchTab(col, "Collector", true)
+switchTab(ins, "Library", true)
+collectorButton:SetActive(col.widget.Enabled)
+inserterButton:SetActive(ins.widget.Enabled)
 refresh()
-if insWidget.Enabled then
+if ins.widget.Enabled then
 	refreshInserter()
 end
