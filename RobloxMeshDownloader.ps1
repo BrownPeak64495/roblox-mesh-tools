@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '3.4'
+$AppVersion = '3.5'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -270,7 +270,7 @@ $xaml = @'
           </Border>
           <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
             <TextBlock Text="Mesh Downloader" Foreground="#F2F2F5" FontWeight="Bold" FontSize="15"/>
-            <TextBlock x:Name="VersionText" Text="v3.4" Foreground="#6F6F78" FontSize="11"/>
+            <TextBlock x:Name="VersionText" Text="v3.5" Foreground="#6F6F78" FontSize="11"/>
           </StackPanel>
         </StackPanel>
         <Border Grid.Column="1" CornerRadius="8" Background="#141418" BorderBrush="#2A2A31"

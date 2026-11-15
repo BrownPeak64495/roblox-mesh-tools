@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v3.4
+ROBLOX MESH TOOLS v3.5
 ======================
 
 What's in here
@@ -106,6 +106,11 @@ The Update source is already set to:
 New versions are pushed there, and the app installs them on its own the next
 time it opens (then restart Studio to load a new plugin version).
 "Check for updates" in Advanced Settings checks right away.
+
+The Studio plugin also checks when you open its window (and every 30 min).
+If there's a newer version it shows a banner at the top: open Mesh
+Downloader (it updates itself + the plugin), then restart Studio.
+The first time, Studio asks to allow raw.githubusercontent.com - click Allow.
 
 --------------------------------------------------
 LIMITS

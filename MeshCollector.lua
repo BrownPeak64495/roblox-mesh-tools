@@ -31,6 +31,8 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
+local PLUGIN_VERSION = "3.5" -- keep in sync with version.json
+local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
 local LOCAL_PREFIX = "rbxasset://meshtools/"
@@ -828,6 +830,87 @@ local function setLink(connected)
 	end
 end
 
+-- Update banner (top of both windows)
+local banners = {}
+local function makeBanner(root)
+	local b = new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundColor3 = ACCENT,
+		TextColor3 = WHITE,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		Visible = false,
+		LayoutOrder = 0,
+		Text = "",
+	}, { corner(8), padding(8, 10, 8, 10) })
+	b.Parent = root
+	table.insert(banners, b)
+end
+
+local function setBanner(text)
+	for _, b in ipairs(banners) do
+		b.Text = text or ""
+		b.Visible = text ~= nil
+	end
+end
+
+-- true if version a is newer than version b ("3.10" > "3.9")
+local function versionNewer(a, b)
+	local function parts(v)
+		local t = {}
+		for n in string.gmatch(tostring(v or ""), "%d+") do
+			table.insert(t, tonumber(n))
+		end
+		return t
+	end
+	local x, y = parts(a), parts(b)
+	for i = 1, math.max(#x, #y) do
+		local p, q = x[i] or 0, y[i] or 0
+		if p ~= q then
+			return p > q
+		end
+	end
+	return false
+end
+
+local appVersion = nil -- reported by Mesh Downloader
+local lastUpdateCheck = 0
+
+local function checkForUpdate()
+	lastUpdateCheck = os.time()
+	local latest = nil
+	local ok, res = pcall(function()
+		return HttpService:RequestAsync({ Url = VERSION_URL .. "?t=" .. tostring(os.time()), Method = "GET" })
+	end)
+	if ok and res.Success then
+		local okD, d = pcall(function()
+			return HttpService:JSONDecode(res.Body)
+		end)
+		if okD and type(d) == "table" and d.version then
+			latest = tostring(d.version)
+		end
+	end
+	if appVersion and (not latest or versionNewer(appVersion, latest)) then
+		latest = appVersion
+	end
+	if latest and versionNewer(latest, PLUGIN_VERSION) then
+		if appVersion and not versionNewer(latest, appVersion) then
+			setBanner(string.format("Mesh Tools v%s is installed - restart Studio to load it (this is v%s).", latest, PLUGIN_VERSION))
+		else
+			setBanner(string.format(
+				"Update available: v%s (you have v%s). Open Mesh Downloader - it updates itself and this plugin - then restart Studio.",
+				latest,
+				PLUGIN_VERSION
+			))
+		end
+	else
+		setBanner(nil)
+	end
+end
+
 local function makeWidget(id, title, w, h, dock)
 	local info = DockWidgetPluginGuiInfo.new(dock or Enum.InitialDockState.Right, false, false, w, h, 300, 380)
 	local widget = plugin:CreateDockWidgetPluginGui(id, info)
@@ -836,6 +919,7 @@ local function makeWidget(id, title, w, h, dock)
 	local root = new("Frame", { Size = UDim2.fromScale(1, 1), BorderSizePixel = 0 }, { padding(10, 10, 10, 10), vlist(8) })
 	theme(root, "BackgroundColor3", C.MainBackground)
 	root.Parent = widget
+	makeBanner(root)
 	return widget, root
 end
 
@@ -846,7 +930,7 @@ local colWidget, colRoot = makeWidget("MeshCollectorV2", "Mesh Collector", 360, 
 
 local header = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = 1 })
 header.Parent = colRoot
-label({ Text = "Mesh Collector", Font = Enum.Font.GothamBold, TextSize = 15, Size = UDim2.new(0.5, 0, 1, 0) }).Parent = header
+label({ Text = "Mesh Collector  v" .. PLUGIN_VERSION, Font = Enum.Font.GothamBold, TextSize = 15, Size = UDim2.new(0.6, 0, 1, 0) }).Parent = header
 makePill(header)
 
 local summary = dimLabel("Select a model or part in Explorer.", 2)
@@ -2304,8 +2388,18 @@ end)
 task.spawn(function()
 	while alive do
 		if colWidget.Enabled or insWidget.Enabled then
-			local ok = request("GET", "/ping")
+			local ok, res = request("GET", "/ping")
 			setLink(ok)
+			if ok then
+				local d = decodeBody(res)
+				if d and d.version then
+					appVersion = tostring(d.version)
+				end
+			end
+			-- check GitHub when a window opens, then every 30 minutes
+			if os.time() - lastUpdateCheck > 1800 then
+				checkForUpdate()
+			end
 		end
 		task.wait(3)
 	end
