@@ -20,7 +20,7 @@ Add-Type -AssemblyName System.Security
 # No console window, so show startup errors in a popup instead of failing silently.
 trap {
     try { [System.Windows.MessageBox]::Show("Mesh Downloader hit an error:`n`n" + $_.Exception.Message, 'Mesh Downloader') | Out-Null } catch { }
-    break
+    continue
 }
 
 # Only one copy at a time (a second copy couldn't talk to Studio anyway).

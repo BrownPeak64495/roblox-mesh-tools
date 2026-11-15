@@ -1,8 +1,10 @@
-ROBLOX MESH TOOLS v3.1
+ROBLOX MESH TOOLS v3.2
 ======================
 
 What's in here
-  Start Mesh Downloader.bat   Double-click this to open the app
+  Mesh Downloader.vbs         Opens the app (no console window)
+  Start Mesh Downloader.bat   Same thing - handy for the very first run
+  MeshDownloader.ico          The app's icon
   RobloxMeshDownloader.ps1    The Mesh Downloader app
   MeshCollector.lua           The Studio plugin (the app installs it for you)
   version.json                Used by the auto-updater
@@ -12,8 +14,11 @@ SETUP (once)
 --------------------------------------------------
 1. Unzip this folder somewhere you'll keep it (e.g. Documents\RobloxMeshTools).
    Replace your old copy of these files.
-2. Double-click "Start Mesh Downloader.bat".
+2. Double-click "Start Mesh Downloader.bat" (only this first time).
    (SmartScreen? More info -> Run anyway.)
+   - The app puts a "Mesh Downloader" icon on your Desktop and in the
+     Start menu. Use that from now on. (Right-click it > Pin to taskbar
+     if you like.)
    - The app copies the plugin into Studio's Plugins folder by itself.
    - It also moves any "[local]" models that the old version saved into the
      Plugins folder over to Roblox Meshes\Local Models.
@@ -94,7 +99,8 @@ APP OPTIONS
 AUTOMATIC UPDATES
 --------------------------------------------------
 Every time the app starts it:
-  - re-installs the Studio plugin if it changed, and
+  - re-installs the Studio plugin if it changed (BOTH the app and the
+    plugin update - restart Studio to load a new plugin), and
   - if an Update source is set (Advanced Settings), checks it for a newer
     version, downloads it, replaces its own files and restarts.
 
