@@ -7,13 +7,13 @@
 - Browse, preview and insert everything you've downloaded.
 
 ## Install
-1. Download **[Install Mesh Downloader.bat](https://github.com/BrownPeak64495/roblox-mesh-tools/raw/main/Install%20Mesh%20Downloader.bat)** and double-click it
-   (SmartScreen? More info > Run anyway).
-2. Pick where to install (any drive). It makes a `Mesh Downloader` folder there, opens the app, and the app adds a
-   **Mesh Downloader** icon to your Desktop and Start menu and installs the Studio plugin.
-3. Restart Studio.
-
-Full guide: [README.txt](README.txt)
+1. **[Click here to download the installer](https://github.com/BrownPeak64495/roblox-mesh-tools/raw/main/Install%20Mesh%20Downloader.zip)** (a small .zip).
+2. Open the downloaded zip and double-click **Install Mesh Downloader.bat** inside it
+   (Windows may ask "Extract all?" - either way works).
+   SmartScreen? Click **More info** > **Run anyway**.
+3. Pick where to install (any drive, external drives are fine). It makes a `Mesh Downloader` folder there,
+   opens the app, and the app adds a **Mesh Downloader** icon to your Desktop and Start menu and installs the Studio plugin.
+4. Restart Studio.
 
 ## Updates
 The app checks this repo every time it opens (`version.json`). If there's a newer version it downloads it,
