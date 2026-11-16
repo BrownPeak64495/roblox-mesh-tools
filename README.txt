@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v4.5
+ROBLOX MESH TOOLS v4.6
 ======================
 
 What's in here
@@ -134,6 +134,8 @@ Use it:
   Live: turn it on and objects you've sent once resend by themselves after
      you stop changing them for "Wait" seconds.
   Unlink (chain button): the next send makes a new part instead.
+  After Mesh Downloader updates, reinstall the add-on in Blender (same
+  steps) to get its newest version - Blender keeps its own copy.
 
 Options (Send to Studio > Options):
   Studs per metre   1 = a 2 m cube becomes 2 studs. Roblox's docs count
@@ -141,8 +143,8 @@ Options (Send to Studio > Options):
   Flip texture vertically  on by default; turn off if the texture is
                     upside-down.
   Flip faces        turn on if the mesh looks inside-out.
-  Turn around (180) Blender's front lands on Roblox's back (same as an FBX
-                    export). Turn on to face Roblox's front.
+  Face Roblox's front  on by default: Blender's front (-Y) becomes Roblox's
+                    front (-Z), like Roblox's own character meshes.
   Apply modifiers, Send texture, Port.
 
 Plugin settings (Settings tab > Blender): receive on/off, add new objects,

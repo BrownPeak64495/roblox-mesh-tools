@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -338,8 +338,8 @@ class RMT_Props(bpy.types.PropertyGroup):
     flip_faces: bpy.props.BoolProperty(
         name="Flip faces", default=False, description="Turn on if the mesh shows inside-out in Studio")
     turn_around: bpy.props.BoolProperty(
-        name="Turn around (180°)", default=False,
-        description="Blender's front (-Y) lands on Roblox's back, same as an FBX export. Turn on to face Roblox's front instead")
+        name="Face Roblox's front", default=True,
+        description="Blender's front (-Y) becomes Roblox's front (-Z), the way Roblox's own character meshes are stored. Off = same as a plain FBX export (front ends up facing backwards)")
     apply_modifiers: bpy.props.BoolProperty(name="Apply modifiers", default=True)
     send_texture: bpy.props.BoolProperty(
         name="Send texture", default=True, description="Sends the image plugged into Base Color")
