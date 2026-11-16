@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "4.6" -- keep in sync with version.json
+local PLUGIN_VERSION = "4.7" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1015,6 +1015,18 @@ local function contentUri(inst, prop)
 	return uri
 end
 
+-- A MeshPart's texture link, wherever Studio keeps it (TextureID or TextureContent)
+local function textureOf(mp)
+	local t = ""
+	pcall(function()
+		t = mp.TextureID
+	end)
+	if t == "" then
+		t = contentUri(mp, "TextureContent")
+	end
+	return t
+end
+
 local function meshIdOf(inst)
 	if inst:IsA("MeshPart") then
 		local id = ""
@@ -1361,6 +1373,14 @@ local function convertMeshPart(mp, id)
 		pcall(function()
 			p[prop] = mp[prop]
 		end)
+	end
+	if p.TextureID == "" then
+		local t = textureOf(mp) -- texture kept only in TextureContent
+		if t ~= "" then
+			pcall(function()
+				p.TextureID = t
+			end)
+		end
 	end
 	copyAttributesAndTags(mp, p)
 	for _, child in ipairs(mp:GetChildren()) do
@@ -3102,7 +3122,7 @@ local function buildLocal()
 		for _, d in ipairs(list) do
 			pcall(function()
 				if d:IsA("MeshPart") then
-					local l = swapTex(d.TextureID)
+					local l = swapTex(textureOf(d))
 					if l then
 						d.TextureID = l
 					end
@@ -3323,7 +3343,7 @@ local function applyLocalTextures(root)
 	table.insert(list, root)
 	for _, d in ipairs(list) do
 		if d:IsA("MeshPart") then
-			local l = localTex(d.TextureID)
+			local l = localTex(textureOf(d))
 			if l then
 				pcall(function()
 					d.TextureID = l
