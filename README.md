@@ -5,7 +5,8 @@
 - Download Roblox meshes as real `.mesh` files (Open Cloud API key, stored encrypted on your PC - never in this repo).
 - Build local copies of models whose MeshParts load your `.mesh` files (`rbxasset://meshtools/<id>.mesh`).
 - Browse, preview and insert everything you've downloaded.
-- **Blender to Studio, no upload:** the `mesh_tools_blender.py` add-on sends your object to Studio as a local `.mesh` (with its texture). Resending updates the same part; Live mode resends as you edit. See README.txt.
+- **Blender to Studio, no upload:** the `mesh_tools_blender.py` add-on sends your object to Studio as a local `.mesh` (with its texture, bones and weights). Resending updates the same part; Live mode resends as you edit and moves the bones as you pose. See README.txt.
+- **Import .obj** in the Studio plugin: converts it to a local `.mesh` and inserts it.
 
 ## Install
 1. **[Click here to download Mesh Downloader](https://github.com/BrownPeak64495/roblox-mesh-tools/archive/refs/heads/main.zip)** (a .zip).

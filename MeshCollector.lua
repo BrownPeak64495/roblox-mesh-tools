@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "4.7" -- keep in sync with version.json
+local PLUGIN_VERSION = "4.8" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -951,6 +951,38 @@ local function deserialize(buf)
 		return res
 	end
 	return nil, tostring(res)
+end
+
+-- Sends bytes (a buffer) to the app in base64 chunks. Returns true + the app's reply.
+local function uploadToApp(buf, name, kind, folder)
+	local data = b64encode(buf)
+	local CHUNK = 700000 -- characters per request (multiple of 4)
+	local count = math.max(1, math.ceil(#data / CHUNK))
+	local uid = HttpService:GenerateGUID(false)
+	for i = 0, count - 1 do
+		local body = HttpService:JSONEncode({
+			id = uid,
+			index = i,
+			count = count,
+			name = name,
+			kind = kind,
+			folder = folder,
+			data = string.sub(data, i * CHUNK + 1, (i + 1) * CHUNK),
+		})
+		local ok, res = request("POST", "/savemodel", body)
+		if not ok then
+			local d = type(res) == "table" and decodeBody(res)
+			return false, (d and d.error) or "couldn't reach Mesh Downloader (is it open?)"
+		end
+		if i == count - 1 then
+			local d = decodeBody(res)
+			if d and d.ok and d.done then
+				return true, d
+			end
+			return false, (d and d.error) or "Mesh Downloader didn't confirm"
+		end
+	end
+	return false, "nothing was sent"
 end
 
 -- Sends a model to the app, which writes the .rbxm into
@@ -3186,13 +3218,17 @@ local insPage = ins.pages.Library
 
 local searchHolder, searchBox = textInput("Search meshes and models...", 1)
 local refreshLibButton = button("Refresh", "secondary")
+local importObjButton = button("Import .obj", "secondary")
 local searchRow = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = 1 }, { hlist(6) })
-searchHolder.Size = UDim2.new(1, -86, 1, 0)
+searchHolder.Size = UDim2.new(1, -184, 1, 0)
 searchHolder.LayoutOrder = 1
 searchHolder.Parent = searchRow
 refreshLibButton.Size = UDim2.new(0, 80, 1, 0)
 refreshLibButton.LayoutOrder = 2
 refreshLibButton.Parent = searchRow
+importObjButton.Size = UDim2.new(0, 92, 1, 0)
+importObjButton.LayoutOrder = 3
+importObjButton.Parent = searchRow
 searchRow.Parent = insPage
 
 local pivotRow = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = 3 })
@@ -4303,6 +4339,315 @@ RunService.Heartbeat:Connect(function()
 	gh.frame.Position = UDim2.fromOffset(gh.pos.X, gh.pos.Y)
 end)
 
+-- ---------------------------------------------------------------
+-- Import .obj: converted to a .mesh right here, saved by the app, inserted as a local MeshPart
+-- ---------------------------------------------------------------
+do
+	local StudioService = game:GetService("StudioService")
+
+	local function baseName(path)
+		path = string.gsub(tostring(path or ""), "\\", "/")
+		return string.match(path, "([^/]+)$") or path
+	end
+
+	-- OBJ text -> Roblox .mesh version 2.00 (buffer). OBJ is already Y-up / front -Z
+	-- (Blender's default OBJ export), the same as Roblox, so no turning needed.
+	local function objToMesh(src)
+		local px, py, pz, tu, tv, nx, ny, nz = {}, {}, {}, {}, {}, {}, {}, {}
+		local vPos, vTex, vNrm = {}, {}, {}
+		local faces = {}
+		local seen = {}
+		local mtllib, usemtl = nil, nil
+		local count = 0
+
+		local function vertex(tok)
+			local a, b, c = string.match(tok, "^(-?%d+)/?(-?%d*)/?(-?%d*)$")
+			if not a then
+				return nil
+			end
+			local vi, ti, ni = tonumber(a), tonumber(b), tonumber(c)
+			if vi < 0 then
+				vi = #px + vi + 1
+			end
+			if ti and ti < 0 then
+				ti = #tu + ti + 1
+			end
+			if ni and ni < 0 then
+				ni = #nx + ni + 1
+			end
+			if not px[vi] then
+				return nil
+			end
+			ti = (ti and tu[ti]) and ti or 0
+			ni = (ni and nx[ni]) and ni or 0
+			local key = vi .. "/" .. ti .. "/" .. ni
+			local idx = seen[key]
+			if not idx then
+				table.insert(vPos, vi)
+				table.insert(vTex, ti)
+				table.insert(vNrm, ni)
+				idx = #vPos - 1
+				seen[key] = idx
+			end
+			return idx
+		end
+
+		for line in string.gmatch(src, "[^\r\n]+") do
+			count = count + 1
+			if count % 20000 == 0 then
+				task.wait()
+			end
+			local kind, rest = string.match(line, "^%s*(%S+)%s*(.-)%s*$")
+			if kind == "v" then
+				local x, y, z = string.match(rest, "^(%S+)%s+(%S+)%s+(%S+)")
+				table.insert(px, tonumber(x) or 0)
+				table.insert(py, tonumber(y) or 0)
+				table.insert(pz, tonumber(z) or 0)
+			elseif kind == "vt" then
+				local u, v = string.match(rest, "^(%S+)%s*(%S*)")
+				table.insert(tu, tonumber(u) or 0)
+				table.insert(tv, tonumber(v) or 0)
+			elseif kind == "vn" then
+				local x, y, z = string.match(rest, "^(%S+)%s+(%S+)%s+(%S+)")
+				table.insert(nx, tonumber(x) or 0)
+				table.insert(ny, tonumber(y) or 0)
+				table.insert(nz, tonumber(z) or 0)
+			elseif kind == "f" then
+				local ids = {}
+				for tok in string.gmatch(rest, "%S+") do
+					local i = vertex(tok)
+					if i then
+						table.insert(ids, i)
+					end
+				end
+				for k = 2, #ids - 1 do -- fan: works for triangles, quads and simple polygons
+					table.insert(faces, ids[1])
+					table.insert(faces, ids[k])
+					table.insert(faces, ids[k + 1])
+				end
+			elseif kind == "mtllib" and not mtllib then
+				mtllib = rest
+			elseif kind == "usemtl" and not usemtl then
+				usemtl = rest
+			end
+		end
+
+		local nv, nf = #vPos, #faces / 3
+		if nv == 0 or nf == 0 then
+			error("no faces found in this .obj")
+		end
+
+		-- normals for vertices that don't have one: average of the faces around each point
+		local acc = {}
+		local needs = false
+		for i = 1, nv do
+			if vNrm[i] == 0 then
+				needs = true
+				break
+			end
+		end
+		if needs then
+			for f = 0, nf - 1 do
+				local a, b, c = vPos[faces[f * 3 + 1] + 1], vPos[faces[f * 3 + 2] + 1], vPos[faces[f * 3 + 3] + 1]
+				local A = Vector3.new(px[a], py[a], pz[a])
+				local n = (Vector3.new(px[b], py[b], pz[b]) - A):Cross(Vector3.new(px[c], py[c], pz[c]) - A)
+				for _, p in ipairs({ a, b, c }) do
+					acc[p] = (acc[p] or Vector3.zero) + n
+				end
+			end
+		end
+
+		local lo = Vector3.new(math.huge, math.huge, math.huge)
+		local hi = -lo
+		for i = 1, nv do
+			local p = vPos[i]
+			local v = Vector3.new(px[p], py[p], pz[p])
+			lo = lo:Min(v)
+			hi = hi:Max(v)
+		end
+		local center = (lo + hi) / 2
+
+		local b = buffer.create(13 + 12 + nv * 40 + nf * 12)
+		buffer.writestring(b, 0, "version 2.00\n")
+		buffer.writeu16(b, 13, 12)
+		buffer.writeu8(b, 15, 40)
+		buffer.writeu8(b, 16, 12)
+		buffer.writeu32(b, 17, nv)
+		buffer.writeu32(b, 21, nf)
+		local o = 25
+		for i = 1, nv do
+			local p, t, n = vPos[i], vTex[i], vNrm[i]
+			buffer.writef32(b, o, px[p] - center.X)
+			buffer.writef32(b, o + 4, py[p] - center.Y)
+			buffer.writef32(b, o + 8, pz[p] - center.Z)
+			local nn
+			if n > 0 then
+				nn = Vector3.new(nx[n], ny[n], nz[n])
+			else
+				nn = acc[p] or Vector3.yAxis
+			end
+			if nn.Magnitude > 1e-8 then
+				nn = nn.Unit
+			end
+			buffer.writef32(b, o + 12, nn.X)
+			buffer.writef32(b, o + 16, nn.Y)
+			buffer.writef32(b, o + 20, nn.Z)
+			buffer.writef32(b, o + 24, t > 0 and tu[t] or 0)
+			buffer.writef32(b, o + 28, t > 0 and (1 - tv[t]) or 0) -- Roblox stores V upside-down
+			buffer.writef32(b, o + 32, 0)
+			buffer.writeu32(b, o + 36, 0xFFFFFFFF) -- white vertex colour
+			o = o + 40
+		end
+		for i = 1, #faces do
+			buffer.writeu32(b, o, faces[i])
+			o = o + 4
+		end
+		return b, { verts = nv, tris = nf, center = center, mtllib = mtllib, usemtl = usemtl }
+	end
+
+	-- texture file named in the .mtl (map_Kd) for the material the .obj uses
+	local function textureFromMtl(src, wanted)
+		local maps, first, cur = {}, nil, nil
+		for line in string.gmatch(src, "[^\r\n]+") do
+			local kind, rest = string.match(line, "^%s*(%S+)%s*(.-)%s*$")
+			if kind == "newmtl" then
+				cur = rest
+			elseif kind and string.lower(kind) == "map_kd" and cur then
+				local file = rest
+				if string.sub(file, 1, 1) == "-" then -- options before the file name
+					file = string.match(rest, "(%S+)$") or rest
+				end
+				maps[cur] = baseName(file)
+				first = first or maps[cur]
+			end
+		end
+		return (wanted and maps[wanted]) or first
+	end
+
+	local function pickFiles()
+		local ok, files = pcall(function()
+			return StudioService:PromptImportFiles({ "obj", "mtl", "png", "jpg", "jpeg" })
+		end)
+		if ok and type(files) == "table" then
+			return files
+		end
+		local ok2, one = pcall(function()
+			return StudioService:PromptImportFile({ "obj" })
+		end)
+		if ok2 and one then
+			return { one }
+		end
+		return nil
+	end
+
+	local busy = false
+	importObjButton.MouseButton1Click:Connect(function()
+		if busy then
+			return
+		end
+		local files = pickFiles()
+		if not files or #files == 0 then
+			return
+		end
+		busy = true
+		local objs, mtls, imgs = {}, {}, {}
+		for _, f in ipairs(files) do
+			local n = string.lower(f.Name)
+			if string.match(n, "%.obj$") then
+				table.insert(objs, f)
+			elseif string.match(n, "%.mtl$") then
+				table.insert(mtls, f)
+			elseif string.match(n, "%.png$") or string.match(n, "%.jpe?g$") then
+				imgs[n] = f
+				imgs[1] = imgs[1] or f
+			end
+		end
+		if #objs == 0 then
+			setInsStatus("Pick an .obj file (you can pick its .mtl and texture at the same time).", RED)
+			busy = false
+			return
+		end
+
+		local finish = beginRecording("Import .obj")
+		local made, firstErr = {}, nil
+		local cam = workspace.CurrentCamera
+		local anchor = nil
+		local function importOne(f)
+			local name = string.gsub(f.Name, "%.[oO][bB][jJ]$", "")
+			setInsStatus("Converting " .. f.Name .. "...", nil)
+			local okC, mesh, info = pcall(function()
+				return objToMesh(f:GetBinaryContents())
+			end)
+			if not okC then
+				return nil, mesh
+			end
+			local okU, d = uploadToApp(mesh, name, "mesh")
+			if not okU then
+				return nil, d
+			end
+			-- texture: the one its .mtl names, or the only picture you picked
+			local texFile = nil
+			local img = nil
+			for _, m in ipairs(mtls) do
+				local t = textureFromMtl(m:GetBinaryContents(), info.usemtl)
+				if t and imgs[string.lower(t)] then
+					img = imgs[string.lower(t)]
+					break
+				end
+			end
+			if not img and #objs == 1 then
+				img = imgs[1]
+			end
+			if img then
+				local okT, dt = uploadToApp(buffer.fromstring(img:GetBinaryContents()), name, "texture")
+				if okT and dt.file then
+					texFile = dt.file
+				end
+			end
+			local part, err = createLocalMeshPart(d.id, nil)
+			if not part then
+				return nil, err
+			end
+			part.Name = name
+			part.Anchored = true
+			if texFile then
+				part.TextureID = LOCAL_PREFIX .. "textures/" .. texFile
+			end
+			-- in front of the camera; several files keep their places relative to each other
+			if not anchor then
+				local sz = part.Size
+				local dist = math.max(sz.X, sz.Y, sz.Z) * 1.5 + 6
+				anchor = { at = cam.CFrame.Position + cam.CFrame.LookVector * dist, center = info.center }
+			end
+			part.CFrame = CFrame.new(anchor.at + (info.center - anchor.center))
+			part.Parent = workspace
+			return part
+		end
+		for _, f in ipairs(objs) do
+			local part, err = importOne(f)
+			if part then
+				table.insert(made, part)
+			else
+				firstErr = firstErr or (f.Name .. ": " .. tostring(err))
+			end
+		end
+		finish(#made > 0)
+		if #made > 0 then
+			Selection:Set(made)
+			setInsStatus(
+				string.format("Imported %d .obj as local mesh%s (nothing uploaded).", #made, #made == 1 and "" or "es")
+					.. (firstErr and ("  Problem: " .. firstErr) or ""),
+				firstErr and RED or GREEN
+			)
+			if refreshInserter then
+				task.defer(refreshInserter)
+			end
+		else
+			setInsStatus("Couldn't import: " .. tostring(firstErr), RED)
+		end
+		busy = false
+	end)
+end
 end -- INSERTER BLOCK
 
 -- =================================================================
@@ -4571,6 +4916,71 @@ do
 		return Vector3.new(tonumber(t[1]) or 0, tonumber(t[2]) or 0, tonumber(t[3]) or 0)
 	end
 
+	-- Bones from Blender (names / parents / positions in the part's space). Old ones are replaced.
+	local boneCache = setmetatable({}, { __mode = "k" }) -- part -> { name -> Bone }
+	local function buildBones(p, bones)
+		for _, d in ipairs(p:GetChildren()) do
+			if d:IsA("Bone") and d:GetAttribute("BlenderBone") then
+				d:Destroy()
+			end
+		end
+		boneCache[p] = nil
+		if type(bones) ~= "table" or #bones == 0 then
+			return
+		end
+		local made, pos, byName = {}, {}, {}
+		for i, b in ipairs(bones) do
+			local bone = Instance.new("Bone")
+			bone.Name = tostring(b.n)
+			bone:SetAttribute("BlenderBone", true)
+			local here = Vector3.new(tonumber(b.x) or 0, tonumber(b.y) or 0, tonumber(b.z) or 0)
+			local pi = (tonumber(b.p) or -1) + 1
+			if pi >= 1 and made[pi] then
+				bone.CFrame = CFrame.new(here - pos[pi])
+				bone.Parent = made[pi]
+			else
+				bone.CFrame = CFrame.new(here)
+				bone.Parent = p
+			end
+			made[i], pos[i] = bone, here
+			byName[bone.Name] = bone
+		end
+		boneCache[p] = byName
+	end
+
+	local function bonesOf(p)
+		local c = boneCache[p]
+		if c then
+			return c
+		end
+		c = {}
+		for _, d in ipairs(p:GetDescendants()) do
+			if d:IsA("Bone") then
+				c[d.Name] = d
+			end
+		end
+		boneCache[p] = c
+		return c
+	end
+
+	-- Live posing: Bone.Transform isn't saved with the place, so this never needs undo
+	local function applyPose(ev)
+		if type(ev.t) ~= "table" then
+			return
+		end
+		for _, p in ipairs(blenderParts(ev.key)) do
+			local bones = bonesOf(p)
+			for name, t in pairs(ev.t) do
+				local bone = bones[name]
+				if bone and type(t) == "table" and #t == 12 then
+					pcall(function()
+						bone.Transform = CFrame.new(table.unpack(t))
+					end)
+				end
+			end
+		end
+	end
+
 	local function stamp(p, ev, center, size)
 		p:SetAttribute("BlenderKey", ev.key)
 		p:SetAttribute("BlenderObject", tostring(ev.name))
@@ -4613,6 +5023,7 @@ do
 				p.TextureID = tex
 			end
 			stamp(p, ev, center, size)
+			buildBones(p, ev.bones)
 			return p
 		end
 
@@ -4634,6 +5045,7 @@ do
 			end)
 		end
 		stamp(fresh, ev, center, size)
+		buildBones(fresh, ev.bones)
 		fresh.Parent = p.Parent
 		local sel = Selection:Get()
 		local wasSelected = false
@@ -4651,7 +5063,14 @@ do
 	end
 
 	local function handleBlender(ev)
-		if type(ev) ~= "table" or type(ev.key) ~= "string" or not tostring(ev.id or ""):match("^%d+$") then
+		if type(ev) ~= "table" or type(ev.key) ~= "string" then
+			return
+		end
+		if ev.type == "pose" then
+			applyPose(ev)
+			return
+		end
+		if not tostring(ev.id or ""):match("^%d+$") then
 			return
 		end
 		ev.id = tostring(ev.id)
@@ -4681,6 +5100,7 @@ do
 					p.TextureID = LOCAL_PREFIX .. "textures/" .. ev.texture
 				end
 				stamp(p, ev, center, size)
+				buildBones(p, ev.bones)
 				p.Parent = workspace
 				done = 1
 				if S.blenderSelect then
@@ -4702,6 +5122,7 @@ do
 
 	task.spawn(function()
 		local fails = 0
+		local activeUntil = 0 -- poll fast for a while after something arrives (live posing)
 		while alive do
 			local waitFor = 1
 			if S.blenderReceive and not RunService:IsRunning() then
@@ -4709,6 +5130,12 @@ do
 				if ok then
 					fails = 0
 					local d = decodeBody(res)
+					if d and type(d.events) == "table" and #d.events > 0 then
+						activeUntil = os.clock() + 8
+					end
+					if os.clock() < activeUntil then
+						waitFor = 0.1
+					end
 					if d and type(d.events) == "table" then
 						for _, ev in ipairs(d.events) do
 							local okH, e = pcall(handleBlender, ev)

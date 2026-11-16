@@ -1,23 +1,27 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
-    "description": "Sends meshes straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
+    "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
     "category": "Import-Export",
 }
 
 # How it works
 #   1. Your object is turned into a Roblox .mesh file right here in Blender.
+#      - no armature: version 2.00 (shape + texture coords)
+#      - with an armature: version 7.00 with the bones and weights (same layout
+#        Roblox's own dynamic head uses)
 #   2. It's sent to Mesh Downloader on this PC (http://localhost:47820), which saves it
 #      and copies it into Studio's content folder.
 #   3. The Mesh Tools plugin in Studio picks it up and makes a real MeshPart using
-#      rbxasset://meshtools/<id>.mesh - in the same spot as in Blender.
+#      rbxasset://meshtools/<id>.mesh - in the same spot as in Blender - and builds
+#      the Bones inside it.
 #   Sending the same object again updates the part that's already in Studio.
+#   Posing the armature with Live on moves the Bones in Studio (no resend needed).
 #   Nothing is uploaded to Roblox.
 
-import base64
 import hashlib
 import json
 import os
@@ -32,14 +36,17 @@ import numpy as np
 from bpy.app.handlers import persistent
 
 KEY_PROP = "roblox_mesh_key"   # stored on each object you send, so resends update the same part
+MAX_SUBSET_BONES = 26          # Roblox limit: bones per mesh section
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # never route localhost through a proxy
 
 _state = {
     "status": "Not sent yet",
     "connected": None,
-    "dirty": set(),
+    "dirty": set(),          # objects whose mesh needs resending
+    "pose_dirty": set(),     # objects whose pose needs resending
     "last_change": 0.0,
     "busy": False,
+    "sent": {},              # object key -> info needed to send poses (bones, centre, scale ...)
 }
 
 
@@ -48,10 +55,12 @@ def _url(props, path):
     return "http://localhost:%d%s" % (props.port, path)
 
 
-def _post(props, path, body, meta):
+def _post(props, path, meta, payload=b""):
+    # body = [4-byte length][JSON][raw bytes]
+    j = json.dumps(meta, separators=(",", ":")).encode("utf-8")
+    body = struct.pack("<I", len(j)) + j + payload
     req = urllib.request.Request(_url(props, path), data=body, method="POST")
     req.add_header("Content-Type", "application/octet-stream")
-    req.add_header("X-Meta", base64.b64encode(json.dumps(meta).encode("utf-8")).decode("ascii"))
     try:
         with _opener.open(req, timeout=10) as r:
             data = json.loads(r.read().decode("utf-8"))
@@ -67,14 +76,15 @@ def _post(props, path, body, meta):
     return data
 
 
-# ------------------------------------------------------------------ mesh conversion
-def _to_roblox(v, props):
-    # Blender is Z-up, Roblox is Y-up. Same mapping Blender's FBX exporter uses by default
-    # (Forward -Z, Up Y): (x, y, z) -> (x, z, -y). It's a rotation, so nothing gets mirrored.
-    x, y, z = v[:, 0], v[:, 1], v[:, 2]
+# ------------------------------------------------------------------ axes
+def _axis_matrix(props):
+    # Blender is Z-up, Roblox is Y-up, and Roblox's own character meshes face -Z.
+    #   Face Roblox's front (default): (x, y, z) -> (-x, z, y)   Blender's front (-Y) -> -Z
+    #   off (plain FBX export):         (x, y, z) -> (x, z, -y)
+    # Both are rotations, so nothing gets mirrored.
     if props.turn_around:
-        return np.stack([-x, z, y], axis=1)
-    return np.stack([x, z, -y], axis=1)
+        return np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=np.float64)
+    return np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float64)
 
 
 def _corner_normals(me):
@@ -88,19 +98,38 @@ def _corner_normals(me):
     return out.reshape(n, 3)
 
 
-def build_mesh(obj, depsgraph, props):
-    """Returns (mesh_bytes, center[3], size[3], vertex_count, triangle_count) in Roblox studs."""
-    if props.apply_modifiers:
-        src = obj.evaluated_get(depsgraph)
-    else:
-        src = obj
+def find_armature(obj):
+    for mod in obj.modifiers:
+        if mod.type == "ARMATURE" and mod.object is not None and mod.show_viewport:
+            return mod.object
+    if obj.parent is not None and obj.parent.type == "ARMATURE" and obj.parent_type == "ARMATURE":
+        return obj.parent
+    return None
+
+
+def _bone_order(arm):
+    # parents always before their children
+    order = []
+    def walk(b):
+        order.append(b)
+        for c in b.children:
+            walk(c)
+    for b in arm.data.bones:
+        if b.parent is None:
+            walk(b)
+    return order
+
+
+# ------------------------------------------------------------------ mesh data
+def _read_mesh(obj, depsgraph, props, arm):
+    """Corner-level data in Blender world space (+ per-corner bone weights when skinned)."""
+    src = obj.evaluated_get(depsgraph) if props.apply_modifiers else obj
     me = src.to_mesh()
     try:
         me.calc_loop_triangles()
         nt = len(me.loop_triangles)
         if nt == 0:
             raise RuntimeError("'%s' has no faces" % obj.name)
-
         tri_loops = np.empty(nt * 3, dtype=np.int32)
         me.loop_triangles.foreach_get("loops", tri_loops)
         loop_verts = np.empty(len(me.loops), dtype=np.int32)
@@ -109,7 +138,6 @@ def build_mesh(obj, depsgraph, props):
         me.vertices.foreach_get("co", co)
         co = co.reshape(-1, 3)
         cn = _corner_normals(me)
-
         uv_layer = me.uv_layers.active
         if uv_layer is not None:
             uv = np.empty(len(me.loops) * 2, dtype=np.float32)
@@ -117,13 +145,23 @@ def build_mesh(obj, depsgraph, props):
             uv = uv.reshape(-1, 2)
         else:
             uv = np.zeros((len(me.loops), 2), dtype=np.float32)
+
+        weights = None
+        if arm is not None:
+            group_names = [g.name for g in obj.vertex_groups]
+            weights = [list() for _ in range(len(me.vertices))]
+            for v in me.vertices:
+                w = weights[v.index]
+                for g in v.groups:
+                    if g.weight > 0 and g.group < len(group_names):
+                        w.append((group_names[g.group], g.weight))
     finally:
         src.to_mesh_clear()
 
-    # bake the object's position / rotation / scale into the vertices
     m = np.array(obj.matrix_world, dtype=np.float64)
     m3 = m[:3, :3]
-    pos = co[loop_verts[tri_loops]].astype(np.float64) @ m3.T + m[:3, 3]
+    corner_v = loop_verts[tri_loops]
+    pos = co[corner_v].astype(np.float64) @ m3.T + m[:3, 3]
     try:
         nm = np.linalg.inv(m3).T
     except np.linalg.LinAlgError:
@@ -132,34 +170,105 @@ def build_mesh(obj, depsgraph, props):
     length = np.linalg.norm(nrm, axis=1, keepdims=True)
     length[length == 0] = 1
     nrm /= length
-
-    pos = _to_roblox(pos, props) * props.studs_per_meter
-    nrm = _to_roblox(nrm, props)
     tuv = uv[tri_loops].astype(np.float64)
+    return pos, nrm, tuv, corner_v, weights, np.linalg.det(m3) < 0
+
+
+def _skin_table(weights, bone_index, fallback):
+    """Per Blender vertex: 4 bone indices + 4 weights (0-255, adding up to 255), strongest first."""
+    n = len(weights)
+    idx = np.zeros((n, 4), dtype=np.int32)
+    wts = np.zeros((n, 4), dtype=np.int32)
+    over = 0
+    for i, w in enumerate(weights):
+        w = [(bone_index[name], val) for name, val in w if name in bone_index]
+        if not w:
+            idx[i, 0], wts[i, 0] = fallback, 255
+            continue
+        if len(w) > 4:
+            over += 1
+        w.sort(key=lambda t: -t[1])
+        w = w[:4]                                  # Roblox: up to 4 bones per vertex
+        total = sum(v for _, v in w)
+        q = [int(round(v / total * 255)) for _, v in w]
+        q[0] += 255 - sum(q)                       # exact total of 255
+        for k, (b, _) in enumerate(w):
+            idx[i, k], wts[i, k] = b, q[k]
+    return idx, wts, over
+
+
+def build_mesh(obj, depsgraph, props):
+    """Returns (bytes, info). info: center, size, verts, tris, bones (or None), over4."""
+    arm = find_armature(obj) if props.send_bones else None
+    if arm is not None:
+        # read the mesh in the armature's rest pose (bind pose)
+        old = arm.data.pose_position
+        arm.data.pose_position = "REST"
+        bpy.context.view_layer.update()
+        try:
+            pos, nrm, tuv, corner_v, weights, mirrored = _read_mesh(obj, bpy.context.evaluated_depsgraph_get(), props, arm)
+        finally:
+            arm.data.pose_position = old
+            bpy.context.view_layer.update()
+    else:
+        pos, nrm, tuv, corner_v, weights, mirrored = _read_mesh(obj, depsgraph, props, None)
+
+    ax = _axis_matrix(props)
+    pos = (pos @ ax.T) * props.studs_per_meter
+    nrm = nrm @ ax.T
     if props.flip_v:
         tuv[:, 1] = 1.0 - tuv[:, 1]
 
-    # one vertex per unique (position, normal, uv) - same as Roblox's own meshes
-    rows = np.hstack([np.round(pos, 5), np.round(nrm, 4), np.round(tuv, 5)])
-    rows = np.ascontiguousarray(rows)
+    cols = [np.round(pos, 5), np.round(nrm, 4), np.round(tuv, 5)]
+    bones = None
+    over = 0
+    if arm is not None:
+        order = _bone_order(arm)
+        bone_index = {b.name: i for i, b in enumerate(order)}
+        sidx, swts, over = _skin_table(weights, bone_index, 0)
+        cols += [sidx[corner_v].astype(np.float64), swts[corner_v].astype(np.float64)]
+    rows = np.ascontiguousarray(np.hstack(cols))
     keyed = rows.view(np.dtype((np.void, rows.dtype.itemsize * rows.shape[1]))).ravel()
     _, first, inverse = np.unique(keyed, return_index=True, return_inverse=True)
-    inverse = inverse.ravel()
     verts = rows[first]
-    faces = inverse.reshape(-1, 3).astype(np.uint32)
+    faces = inverse.ravel().reshape(-1, 3).astype(np.int64)
 
-    flip = props.flip_faces
-    if np.linalg.det(m3) < 0:      # negative scale turns faces inside out - undo that
-        flip = not flip
+    flip = props.flip_faces != bool(mirrored)       # negative scale turns faces inside out - undo that
     if flip:
         faces = faces[:, [0, 2, 1]]
 
     lo = verts[:, 0:3].min(axis=0)
     hi = verts[:, 0:3].max(axis=0)
     center = (lo + hi) / 2.0
-    size = hi - lo
     verts[:, 0:3] -= center
+    info = {"center": [float(c) for c in center], "size": [float(s) for s in (hi - lo)], "over4": over}
 
+    if arm is None:
+        data = _write_v2(verts, faces)
+    else:
+        aw = np.array(arm.matrix_world, dtype=np.float64)
+        bones = []
+        for i, b in enumerate(order):
+            head = aw[:3, :3] @ np.array(b.head_local) + aw[:3, 3]
+            p = (ax @ head) * props.studs_per_meter - center
+            parent = bone_index[b.parent.name] if b.parent else -1
+            bones.append({"n": b.name, "p": parent, "x": float(p[0]), "y": float(p[1]), "z": float(p[2])})
+        data, verts_n, faces_n = _write_v7(verts, faces, bones)
+        info["arm"] = arm.name
+        info["bones"] = bones
+        info["order"] = [b.name for b in order]
+        info["ax"] = ax.tolist()
+        info["scale"] = props.studs_per_meter
+    info["verts"] = int(len(verts))
+    info["tris"] = int(len(faces))
+    return data, info
+
+
+_VDT = np.dtype([("p", "<f4", 3), ("n", "<f4", 3), ("uv", "<f4", 2), ("t", "u1", 4), ("c", "u1", 4)])
+
+
+def _write_v2(verts, faces):
+    # version 2.00: header (12 bytes), vertices (40 bytes: pos, normal, uvw, colour), faces (3 x uint32)
     nv = len(verts)
     vdt = np.dtype([("p", "<f4", 3), ("n", "<f4", 3), ("uv", "<f4", 3), ("c", "u1", 4)])
     va = np.zeros(nv, dtype=vdt)
@@ -167,11 +276,156 @@ def build_mesh(obj, depsgraph, props):
     va["n"] = verts[:, 3:6]
     va["uv"][:, 0:2] = verts[:, 6:8]
     va["c"] = 255
-
-    # Roblox .mesh version 2.00: header (12 bytes), vertices (40 bytes each), faces (3 x uint32)
     header = b"version 2.00\n" + struct.pack("<HBBII", 12, 40, 12, nv, len(faces))
-    data = header + va.tobytes() + faces.astype("<u4").tobytes()
-    return data, [float(c) for c in center], [float(s) for s in size], nv, len(faces)
+    return header + va.tobytes() + faces.astype("<u4").tobytes()
+
+
+def _chunk(name, version, payload):
+    return name.ljust(8, b"\0") + struct.pack("<II", version, len(payload)) + payload
+
+
+def _write_v7(verts, faces, bones):
+    """version 7.00 with COREMESH (uncompressed), LODS and SKINNING - tested in Studio with
+    Roblox's own dynamic head rebuilt this way."""
+    skin_idx = verts[:, 8:12].astype(np.int64)
+    skin_w = verts[:, 12:16].astype(np.int64)
+
+    # Roblox needs the mesh in sections of at most 26 bones each
+    face_bones = []
+    for f in faces:
+        s = set()
+        for v in f:
+            for k in range(4):
+                if skin_w[v, k] > 0:
+                    s.add(int(skin_idx[v, k]))
+        face_bones.append(s)
+    dominant = np.array([skin_idx[f[0], 0] for f in faces])
+    order = np.argsort(dominant, kind="stable")      # faces of the same bone stay together
+    groups = []
+    cur, cur_set = [], set()
+    for fi in order:
+        s = face_bones[fi]
+        if cur and len(cur_set | s) > MAX_SUBSET_BONES:
+            groups.append((cur, cur_set))
+            cur, cur_set = [], set()
+        cur.append(fi)
+        cur_set |= s
+    if cur:
+        groups.append((cur, cur_set))
+
+    out_v, out_f, out_s, subsets = [], [], [], []
+    vbase = fbase = 0
+    for flist, bset in groups:
+        blist = sorted(bset)
+        local = {b: i for i, b in enumerate(blist)}
+        gf = faces[np.array(flist)]
+        used, remap = np.unique(gf.ravel(), return_inverse=True)
+        out_v.append(verts[used])
+        out_f.append(remap.reshape(-1, 3) + vbase)
+        si = np.zeros((len(used), 8), dtype=np.uint8)
+        for r, v in enumerate(used):
+            for k in range(4):
+                if skin_w[v, k] > 0:
+                    si[r, k] = local[int(skin_idx[v, k])]
+                    si[r, 4 + k] = skin_w[v, k]
+        out_s.append(si)
+        subsets.append((fbase, len(gf), vbase, len(used), blist))
+        vbase += len(used)
+        fbase += len(gf)
+    V = np.vstack(out_v)
+    F = np.vstack(out_f).astype("<u4")
+    S = np.vstack(out_s)
+
+    nv, nf = len(V), len(F)
+    va = np.zeros(nv, dtype=_VDT)
+    va["p"] = V[:, 0:3]
+    va["n"] = V[:, 3:6]
+    va["uv"] = V[:, 6:8]
+    va["t"] = 127
+    va["c"] = 255
+    core = struct.pack("<I", nv) + va.tobytes() + struct.pack("<I", nf) + F.tobytes()
+    lods = struct.pack("<HBI", 0, 1, 2) + struct.pack("<II", 0, nf)
+
+    names = b""
+    bone_bytes = b""
+    for b in bones:
+        off = len(names)
+        names += b["n"].encode("utf-8") + b"\0"
+        par = b["p"] if b["p"] >= 0 else 0xFFFF
+        bone_bytes += struct.pack("<IHHf9f3f", off, par, par, 0.0,
+                                  1, 0, 0, 0, 1, 0, 0, 0, 1, b["x"], b["y"], b["z"])
+    sub_bytes = b""
+    for fb, fl, vb, vl, blist in subsets:
+        ids = list(blist) + [0xFFFF] * (MAX_SUBSET_BONES - len(blist))
+        sub_bytes += struct.pack("<5I26H", fb, fl, vb, vl, len(blist), *ids)
+    skinning = (struct.pack("<I", nv) + S.tobytes() + struct.pack("<I", len(bones)) + bone_bytes
+                + struct.pack("<I", len(names)) + names + struct.pack("<I", len(subsets)) + sub_bytes)
+
+    data = (b"version 7.00\n" + _chunk(b"COREMESH", 1, core) + _chunk(b"LODS", 1, lods)
+            + _chunk(b"SKINNING", 1, skinning))
+    return data, nv, nf
+
+
+# ------------------------------------------------------------------ poses
+def _ortho(r):
+    u, _, vt = np.linalg.svd(r)
+    q = u @ vt
+    if np.linalg.det(q) < 0:
+        u[:, -1] *= -1
+        q = u @ vt
+    return q
+
+
+def pose_transforms(obj, info):
+    """Bone.Transform for every bone (as CFrame numbers), so Studio's Bones match Blender's pose."""
+    arm = bpy.data.objects.get(info["arm"])
+    if arm is None or arm.type != "ARMATURE":
+        return None
+    ax = np.array(info["ax"])
+    s = info["scale"]
+    c = np.array(info["center"])
+    A = np.eye(4)
+    A[:3, :3] = ax * s
+    A[:3, 3] = -c
+    Ai = np.linalg.inv(A)
+    aw = np.array(arm.matrix_world, dtype=np.float64)
+    awi = np.linalg.inv(aw)
+    bpos = {b["n"]: np.array([b["x"], b["y"], b["z"]]) for b in info["bones"]}
+    parent = {b["n"]: (info["bones"][b["p"]]["n"] if b["p"] >= 0 else None) for b in info["bones"]}
+    M = {}
+    out = {}
+    for name in info["order"]:
+        pb = arm.pose.bones.get(name)
+        if pb is None:
+            continue
+        rest = np.array(pb.bone.matrix_local, dtype=np.float64)
+        mb = aw @ np.array(pb.matrix, dtype=np.float64) @ np.linalg.inv(rest) @ awi
+        mr = A @ mb @ Ai                     # the same movement, in Studio's mesh space
+        mr[:3, :3] = _ortho(mr[:3, :3])     # Roblox bones can't scale
+        M[name] = mr
+        par = parent.get(name)
+        mp = M.get(par, np.eye(4)) if par else np.eye(4)
+        B = np.eye(4)
+        B[:3, 3] = bpos[name]
+        t = np.linalg.inv(B) @ np.linalg.inv(mp) @ mr @ B
+        r = _ortho(t[:3, :3])
+        out[name] = [round(float(v), 5) for v in (t[0, 3], t[1, 3], t[2, 3],
+                                                   r[0, 0], r[0, 1], r[0, 2],
+                                                   r[1, 0], r[1, 1], r[1, 2],
+                                                   r[2, 0], r[2, 1], r[2, 2])]
+    return out
+
+
+def send_pose(obj, props):
+    key = obj.get(KEY_PROP)
+    info = _state["sent"].get(key) if key else None
+    if not info or not info.get("bones"):
+        return False
+    t = pose_transforms(obj, info)
+    if t is None:
+        return False
+    res = _post(props, "/blender/pose", {"key": key, "t": t})
+    return bool(res.get("ok"))
 
 
 # ------------------------------------------------------------------ texture
@@ -227,7 +481,7 @@ def get_texture(obj):
 
 # ------------------------------------------------------------------ sending
 def send_object(obj, props, depsgraph):
-    data, center, size, nv, nt = build_mesh(obj, depsgraph, props)
+    data, info = build_mesh(obj, depsgraph, props)
     key = obj.get(KEY_PROP)
     if not key:
         key = hashlib.sha1(("%s|%f" % (obj.name, time.time())).encode()).hexdigest()[:16]
@@ -239,45 +493,84 @@ def send_object(obj, props, depsgraph):
         if tex:
             th = hashlib.sha1(tex).hexdigest()[:20]
 
-    meta = {"key": key, "name": obj.name, "center": center, "size": size, "texHash": th, "texExt": ext or ""}
-    res = _post(props, "/blender/mesh", data, meta)
+    meta = {"key": key, "name": obj.name, "center": info["center"], "size": info["size"],
+            "texHash": th, "texExt": ext or ""}
+    if info.get("bones"):
+        meta["bones"] = info["bones"]
+    res = _post(props, "/blender/mesh", meta, data)
     if res.get("needTexture") and tex:
-        r2 = _post(props, "/blender/texture", tex, {"hash": th, "ext": ext})
+        r2 = _post(props, "/blender/texture", {"hash": th, "ext": ext}, tex)
         if not r2.get("ok"):
             raise RuntimeError("Texture: " + str(r2.get("error")))
-        res = _post(props, "/blender/mesh", data, meta)
+        res = _post(props, "/blender/mesh", meta, data)
     if not res.get("ok"):
         raise RuntimeError(str(res.get("error") or "Mesh Downloader said no"))
-    return nv, nt
+
+    if info.get("bones"):
+        _state["sent"][key] = info
+        try:
+            send_pose(obj, props)            # show the current pose right away
+        except Exception:
+            pass
+    else:
+        _state["sent"].pop(key, None)
+    return info
 
 
 def _send_many(objs, props, depsgraph):
-    sent, errors = [], []
+    sent, errors, notes = [], [], []
     for obj in objs:
         try:
             if obj.mode == "EDIT":
                 obj.update_from_editmode()
-            nv, nt = send_object(obj, props, depsgraph)
-            sent.append("%s (%d tris)" % (obj.name, nt))
+            info = send_object(obj, props, depsgraph)
+            extra = ", %d bones" % len(info["bones"]) if info.get("bones") else ""
+            sent.append("%s (%d tris%s)" % (obj.name, info["tris"], extra))
+            if info.get("over4"):
+                notes.append("%s: %d vertices had more than 4 bones - kept the strongest 4" % (obj.name, info["over4"]))
         except Exception as e:
             errors.append("%s: %s" % (obj.name, e))
     if sent:
         _state["status"] = "Sent " + ", ".join(sent) + time.strftime("  at %H:%M:%S")
+    if notes:
+        _state["status"] += "  |  " + notes[0]
     if errors:
         _state["status"] = "Problem - " + errors[0]
     return sent, errors
 
 
 # ------------------------------------------------------------------ live mode
+def _linked_objects():
+    return [o for o in bpy.data.objects if o.type == "MESH" and o.get(KEY_PROP)]
+
+
 def _flush():
     scene = bpy.context.scene
     props = scene.roblox_mesh_tools
     if not props.live:
         _state["dirty"].clear()
+        _state["pose_dirty"].clear()
+        return None
+    # poses: small, so they go out quickly
+    if _state["pose_dirty"]:
+        names = list(_state["pose_dirty"])
+        _state["pose_dirty"].clear()
+        _state["busy"] = True
+        try:
+            for n in names:
+                o = bpy.data.objects.get(n)
+                if o is not None:
+                    try:
+                        send_pose(o, props)
+                    except Exception as e:
+                        _state["status"] = "Problem - %s" % e
+        finally:
+            _state["busy"] = False
+    if not _state["dirty"]:
         return None
     wait = props.live_delay - (time.time() - _state["last_change"])
     if wait > 0.02:
-        return wait                      # still changing - wait until it settles
+        return min(wait, 0.1) if _state["pose_dirty"] else wait     # still changing - wait until it settles
     names = list(_state["dirty"])
     _state["dirty"].clear()
     objs = [bpy.data.objects.get(n) for n in names]
@@ -297,24 +590,42 @@ def _on_depsgraph(scene, depsgraph):
     props = getattr(scene, "roblox_mesh_tools", None)
     if props is None or not props.live or _state["busy"]:
         return
-    changed = False
+    mesh_changed = False
+    pose_changed = False
+    linked = None
     for u in depsgraph.updates:
         idb = u.id
         if isinstance(idb, bpy.types.Object):
             obj = idb.original
-            if obj.type == "MESH" and obj.get(KEY_PROP) and (u.is_updated_geometry or u.is_updated_transform):
-                _state["dirty"].add(obj.name)
-                changed = True
+            if obj.type == "ARMATURE":
+                if linked is None:
+                    linked = _linked_objects()
+                for o in linked:
+                    key = o.get(KEY_PROP)
+                    info = _state["sent"].get(key)
+                    if info and info.get("arm") == obj.name:
+                        _state["pose_dirty"].add(o.name)
+                        pose_changed = True
+            elif obj.type == "MESH" and obj.get(KEY_PROP):
+                skinned = obj.get(KEY_PROP) in _state["sent"]
+                # a skinned mesh's geometry "changes" every time its armature moves - poses
+                # handle that, so only resend it when it's moved or really edited
+                if u.is_updated_transform or (u.is_updated_geometry and not skinned):
+                    _state["dirty"].add(obj.name)
+                    mesh_changed = True
         elif isinstance(idb, bpy.types.Mesh):
             me = idb.original
-            for obj in scene.objects:
-                if obj.type == "MESH" and obj.data == me and obj.get(KEY_PROP):
+            if linked is None:
+                linked = _linked_objects()
+            for obj in linked:
+                if obj.data == me:
                     _state["dirty"].add(obj.name)
-                    changed = True
-    if changed:
+                    mesh_changed = True
+    if mesh_changed:
         _state["last_change"] = time.time()
-        if not bpy.app.timers.is_registered(_flush):
-            bpy.app.timers.register(_flush, first_interval=max(0.1, props.live_delay))
+    if (mesh_changed or pose_changed) and not bpy.app.timers.is_registered(_flush):
+        first = 0.05 if pose_changed else max(0.1, props.live_delay)
+        bpy.app.timers.register(_flush, first_interval=first)
 
 
 def _redraw():
@@ -343,12 +654,15 @@ class RMT_Props(bpy.types.PropertyGroup):
     apply_modifiers: bpy.props.BoolProperty(name="Apply modifiers", default=True)
     send_texture: bpy.props.BoolProperty(
         name="Send texture", default=True, description="Sends the image plugged into Base Color")
+    send_bones: bpy.props.BoolProperty(
+        name="Send bones", default=True,
+        description="Objects with an Armature get its bones and weights, so they bend in Studio")
     live: bpy.props.BoolProperty(
         name="Live", default=False,
-        description="Resend objects you've already sent whenever they change")
+        description="Resend objects you've already sent whenever they change, and move their bones when you pose")
     live_delay: bpy.props.FloatProperty(
         name="Wait", default=1.0, min=0.2, max=10.0, subtype="TIME", unit="TIME",
-        description="How long things have to stop changing before it resends")
+        description="How long the mesh has to stop changing before it resends (poses go right away)")
     port: bpy.props.IntProperty(name="Port", default=47820, min=1, max=65535)
 
 
@@ -361,6 +675,10 @@ class RMT_OT_send(bpy.types.Operator):
         objs = [o for o in context.selected_objects if o.type == "MESH"]
         if not objs and context.active_object and context.active_object.type == "MESH":
             objs = [context.active_object]
+        if not objs:
+            # an armature is selected: send the meshes it moves
+            arms = [o for o in context.selected_objects if o.type == "ARMATURE"]
+            objs = [o for o in context.scene.objects if o.type == "MESH" and find_armature(o) in arms]
         if not objs:
             self.report({"WARNING"}, "Select a mesh object first")
             return {"CANCELLED"}
@@ -377,6 +695,28 @@ class RMT_OT_send(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class RMT_OT_pose(bpy.types.Operator):
+    bl_idname = "roblox_mesh_tools.pose"
+    bl_label = "Send pose"
+    bl_description = "Move the Bones in Studio to match the current pose (for objects already sent)"
+
+    def execute(self, context):
+        props = context.scene.roblox_mesh_tools
+        n = 0
+        for o in _linked_objects():
+            try:
+                if send_pose(o, props):
+                    n += 1
+            except Exception as e:
+                self.report({"ERROR"}, str(e))
+                return {"CANCELLED"}
+        if n == 0:
+            self.report({"WARNING"}, "Send a mesh with an armature first")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Sent the pose of %d object(s)" % n)
+        return {"FINISHED"}
+
+
 class RMT_OT_unlink(bpy.types.Operator):
     bl_idname = "roblox_mesh_tools.unlink"
     bl_label = "Unlink"
@@ -386,6 +726,7 @@ class RMT_OT_unlink(bpy.types.Operator):
         n = 0
         for o in context.selected_objects:
             if KEY_PROP in o:
+                _state["sent"].pop(o[KEY_PROP], None)
                 del o[KEY_PROP]
                 n += 1
         self.report({"INFO"}, "Unlinked %d object(s)" % n)
@@ -408,6 +749,8 @@ class RMT_PT_panel(bpy.types.Panel):
         row = self.layout.row(align=True)
         row.prop(props, "live", toggle=True, icon="REC" if props.live else "PLAY")
         row.prop(props, "live_delay")
+        if any(_state["sent"].values()):
+            self.layout.operator("roblox_mesh_tools.pose", icon="ARMATURE_DATA")
         if props.live:
             self.layout.label(text="Live updates objects you've sent once", icon="INFO")
 
@@ -417,6 +760,8 @@ class RMT_PT_panel(bpy.types.Panel):
             box.label(text="Open Mesh Downloader (Studio link on)", icon="ERROR")
 
         obj = context.active_object
+        if obj and obj.type == "MESH" and find_armature(obj) is not None and props.send_bones:
+            self.layout.label(text="Armature: %s (bones will be sent)" % find_armature(obj).name, icon="BONE_DATA")
         if obj and obj.get(KEY_PROP):
             r = self.layout.row()
             r.label(text="Linked to a Studio part", icon="LINKED")
@@ -438,13 +783,14 @@ class RMT_PT_options(bpy.types.Panel):
         col.prop(props, "studs_per_meter")
         col.prop(props, "apply_modifiers")
         col.prop(props, "send_texture")
+        col.prop(props, "send_bones")
         col.prop(props, "flip_v")
         col.prop(props, "flip_faces")
         col.prop(props, "turn_around")
         col.prop(props, "port")
 
 
-CLASSES = (RMT_Props, RMT_OT_send, RMT_OT_unlink, RMT_PT_panel, RMT_PT_options)
+CLASSES = (RMT_Props, RMT_OT_send, RMT_OT_pose, RMT_OT_unlink, RMT_PT_panel, RMT_PT_options)
 
 
 def register():
@@ -453,11 +799,28 @@ def register():
     bpy.types.Scene.roblox_mesh_tools = bpy.props.PointerProperty(type=RMT_Props)
     if _on_depsgraph not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
+    if _on_frame not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_on_frame)
+
+
+@persistent
+def _on_frame(scene, depsgraph=None):
+    # playing an animation: stream the pose
+    props = getattr(scene, "roblox_mesh_tools", None)
+    if props is None or not props.live or _state["busy"]:
+        return
+    for o in _linked_objects():
+        if o.get(KEY_PROP) in _state["sent"]:
+            _state["pose_dirty"].add(o.name)
+    if _state["pose_dirty"] and not bpy.app.timers.is_registered(_flush):
+        bpy.app.timers.register(_flush, first_interval=0.05)
 
 
 def unregister():
     if _on_depsgraph in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph)
+    if _on_frame in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_on_frame)
     if bpy.app.timers.is_registered(_flush):
         bpy.app.timers.unregister(_flush)
     del bpy.types.Scene.roblox_mesh_tools

@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '4.7'
+$AppVersion = '4.8'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1475,26 +1475,48 @@ function Read-BodyBytes($ctx) {
     $ctx.Request.InputStream.CopyTo($ms)
     return ,$ms.ToArray()
 }
-function Read-Meta($ctx) {
-    $h = [string]$ctx.Request.Headers['X-Meta']
-    if (-not $h) { return $null }
-    return ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($h)) | ConvertFrom-Json)
+# Blender add-on body: [4-byte length][JSON][raw bytes]
+function Read-Framed($ctx) {
+    [byte[]]$all = Read-BodyBytes $ctx
+    if ($all.Length -lt 4) { throw 'empty request' }
+    $n = [BitConverter]::ToInt32($all, 0)
+    if ($n -lt 2 -or $n -gt ($all.Length - 4)) { throw 'bad request' }
+    $meta = [Text.Encoding]::UTF8.GetString($all, 4, $n) | ConvertFrom-Json
+    $rest = $all.Length - 4 - $n
+    [byte[]]$payload = New-Object byte[] $rest
+    if ($rest -gt 0) { [Array]::Copy($all, 4 + $n, $payload, 0, $rest) }
+    return @{ meta = $meta; bytes = $payload }
 }
 
 function Receive-BlenderTexture($ctx) {
-    $m = Read-Meta $ctx
+    $req = Read-Framed $ctx
+    $m = $req.meta
     $hash = [string]$m.hash
     if ($hash -notmatch '^[0-9a-f]{8,40}$') { Send-Json $ctx @{ ok = $false; error = 'bad texture hash' } 400; return }
-    [byte[]]$bytes = Read-BodyBytes $ctx
+    [byte[]]$bytes = $req.bytes
     $name = Install-Texture (New-BlenderId '8') $bytes
     if (-not $name) { Send-Json $ctx @{ ok = $false; error = 'texture must be a PNG or JPG' } 400; return }
     $script:blenderTex[$hash] = $name
     Send-Json $ctx @{ ok = $true; file = $name }
 }
 
+function Receive-BlenderPose($ctx) {
+    $req = Read-Framed $ctx
+    $m = $req.meta
+    $key = [string]$m.key
+    if ($key -notmatch '^[0-9a-f]{6,40}$') { Send-Json $ctx @{ ok = $false; error = 'bad object key' } 400; return }
+    for ($i = $script:blenderEvents.Count - 1; $i -ge 0; $i--) {
+        $e = $script:blenderEvents[$i]
+        if ($e.key -eq $key -and $e.type -eq 'pose') { $script:blenderEvents.RemoveAt($i) }
+    }
+    $script:blenderEvents.Add(@{ type = 'pose'; key = $key; t = $m.t })
+    Send-Json $ctx @{ ok = $true }
+}
+
 function Receive-BlenderMesh($ctx) {
-    $m = Read-Meta $ctx
-    [byte[]]$bytes = Read-BodyBytes $ctx
+    $req = Read-Framed $ctx
+    $m = $req.meta
+    [byte[]]$bytes = $req.bytes
     $key = [string]$m.key
     if ($key -notmatch '^[0-9a-f]{6,40}$') { Send-Json $ctx @{ ok = $false; error = 'bad object key' } 400; return }
     if (-not $TglInstall.IsChecked) { Send-Json $ctx @{ ok = $false; error = "Turn on 'Install meshes into Studio' in Mesh Downloader" } 409; return }
@@ -1512,8 +1534,10 @@ function Receive-BlenderMesh($ctx) {
         }
     }
 
-    if ($bytes.Length -lt 25 -or [Text.Encoding]::ASCII.GetString($bytes, 0, 12) -ne 'version 2.00') {
-        Send-Json $ctx @{ ok = $false; error = 'not a version 2.00 .mesh' } 400; return
+    $head = ''
+    if ($bytes.Length -ge 25) { $head = [Text.Encoding]::ASCII.GetString($bytes, 0, 12) }
+    if ($head -ne 'version 2.00' -and $head -ne 'version 7.00') {
+        Send-Json $ctx @{ ok = $false; error = 'not a version 2.00 / 7.00 .mesh' } 400; return
     }
     $id = New-BlenderId '9'
     Install-Mesh $id $bytes
@@ -1544,15 +1568,17 @@ function Receive-BlenderMesh($ctx) {
         }
     }
 
-    # tell the plugin (only the newest event per object is kept)
+    # tell the plugin (only the newest event per object is kept; a new mesh replaces old poses too)
     for ($i = $script:blenderEvents.Count - 1; $i -ge 0; $i--) {
         if ($script:blenderEvents[$i].key -eq $key) { $script:blenderEvents.RemoveAt($i) }
     }
-    $script:blenderEvents.Add(@{
-        id = $id; key = $key; name = $name; texture = $tex
+    $ev = @{
+        type = 'mesh'; id = $id; key = $key; name = $name; texture = $tex
         center = @([double]$m.center[0], [double]$m.center[1], [double]$m.center[2])
         size = @([double]$m.size[0], [double]$m.size[1], [double]$m.size[2])
-    })
+    }
+    if ($m.bones) { $ev.bones = @($m.bones) }
+    $script:blenderEvents.Add($ev)
     Send-Json $ctx @{ ok = $true; id = $id }
 
     $now = Get-Date
@@ -1669,6 +1695,7 @@ function Handle-Request($ctx) {
         }
         if ($path -eq '/blender/mesh' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderMesh $ctx; return }
         if ($path -eq '/blender/texture' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderTexture $ctx; return }
+        if ($path -eq '/blender/pose' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderPose $ctx; return }
         if ($path -eq '/blender/next') {
             $script:lastPing = Get-Date
             $ev = [object[]]$script:blenderEvents.ToArray()
@@ -1731,6 +1758,30 @@ function Handle-Request($ctx) {
 
             $script:uploads.Remove($uid)
             [byte[]]$mb = [Convert]::FromBase64String(($up.parts -join ''))
+            if ([string]$d.kind -eq 'mesh') {
+                # a .mesh the plugin converted (e.g. from an .obj): library + Studio, ready to insert
+                if (-not $TglInstall.IsChecked) { Send-Json $ctx @{ ok = $false; error = "Turn on 'Install meshes into Studio' in Mesh Downloader" } 409; return }
+                if ($script:studioDirs.Count -eq 0) { $script:studioDirs = @(Get-StudioContentDirs) }
+                if ($script:studioDirs.Count -eq 0) { Send-Json $ctx @{ ok = $false; error = "Mesh Downloader can't find Roblox Studio" } 409; return }
+                if ($mb.Length -lt 25 -or [Text.Encoding]::ASCII.GetString($mb, 0, 8) -ne 'version ') { Send-Json $ctx @{ ok = $false; error = 'not a .mesh' } 400; return }
+                $mid = New-BlenderId '7'
+                Install-Mesh $mid $mb
+                $mname = Clean-Field ([string]$d.name)
+                if (-not $mname) { $mname = 'Imported mesh' }
+                $entry = New-IndexEntry $mname $null $mb ((Get-Date).ToString('yyyy-MM-dd HH:mm'))
+                $entry.source = 'obj'
+                $script:index[$mid] = $entry
+                Save-Index
+                Log ("Imported {0} as local mesh {1} ({2})" -f $mname, $mid, (Format-Size $mb.Length))
+                Send-Json $ctx @{ ok = $true; done = $true; id = $mid }
+                return
+            }
+            if ([string]$d.kind -eq 'texture') {
+                $tname = Install-Texture (New-BlenderId '6') $mb
+                if (-not $tname) { Send-Json $ctx @{ ok = $false; error = 'texture must be a PNG or JPG' } 400; return }
+                Send-Json $ctx @{ ok = $true; done = $true; file = $tname }
+                return
+            }
             if ([string]$d.kind -eq 'look') {
                 $lid = [string]$d.name
                 if ($lid -notmatch '^\d{5,}$') { Send-Json $ctx @{ ok = $false; error = 'bad id' } 400; return }
@@ -1811,11 +1862,14 @@ function Stop-Link {
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(150)
 $timer.Add_Tick({
-    if ($script:ctxTask -and $script:ctxTask.IsCompleted) {
+    # handle every request that's waiting (Blender poses + plugin polls can come several at a time)
+    $handled = 0
+    while ($script:ctxTask -and $script:ctxTask.IsCompleted -and $handled -lt 12) {
         $t = $script:ctxTask
         $script:ctxTask = $null
         if ($script:listener -and $script:listener.IsListening) { $script:ctxTask = $script:listener.GetContextAsync() }
         if ($t.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { Handle-Request $t.Result }
+        $handled++
     }
     if ($script:listener -and $script:listener.IsListening) {
         if (((Get-Date) - $script:lastPing).TotalSeconds -lt 8) { Set-Link 'connected' 'Studio plugin connected' }

@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v4.7
+ROBLOX MESH TOOLS v4.8
 ======================
 
 What's in here
@@ -150,9 +150,35 @@ Options (Send to Studio > Options):
 Plugin settings (Settings tab > Blender): receive on/off, add new objects,
 select on arrival, keep my Studio moves.
 
-Right now: one mesh + one texture per object, no bones yet (they're next).
+BONES: an object with an Armature (modifier or armature parent) is sent with
+its bones and weights (.mesh version 7.00 - the same layout as Roblox's own
+dynamic head, tested in Studio). Studio gets real Bone instances inside the
+part, named like your Blender bones.
+  - Each vertex can follow up to 4 bones (Roblox's limit). If Blender has
+    more, the strongest 4 are kept and the panel tells you how many.
+  - Pose the armature with Live on: the Bones in Studio move to match
+    (only the pose is sent - quick). Playing the timeline streams it.
+    "Send pose" sends it once by hand.
+  - Selecting the armature and pressing Send sends the meshes it moves.
+  - Face controls (dynamic faces) are not made yet - bones first.
+Right now: one texture per object.
 Each send gets a new number so Studio never shows an old cached copy; the
 library keeps only the newest one, and Studio's folder keeps the last 3.
+
+--------------------------------------------------
+IMPORT .OBJ (in the Studio plugin)
+--------------------------------------------------
+Mesh Inserter > "Import .obj" (next to Refresh):
+  1. Pick one or more .obj files. Pick the .mtl and the texture picture
+     (.png / .jpg) at the same time if you have them (Ctrl+click).
+  2. Each .obj is turned into a .mesh inside Studio, saved by Mesh
+     Downloader, and inserted in front of the camera as a local MeshPart,
+     with its texture. Nothing is uploaded.
+  3. They also show up in the Inserter library for later.
+Notes: OBJ from Blender's default export already faces the right way. Only
+the shape + texture (no bones - use the Blender add-on for those). The
+texture is matched by the name in the .mtl; with one .obj and one picture it
+just uses that picture.
 
 --------------------------------------------------
 APP OPTIONS
