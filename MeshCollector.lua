@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "4.4" -- keep in sync with version.json
+local PLUGIN_VERSION = "4.5" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1001,9 +1001,30 @@ local function clean(s)
 end
 
 -- Returns meshId, the part that owns it
+-- Newer Studio keeps some meshes only in MeshContent (MeshId can be empty)
+local function contentUri(inst, prop)
+	local uri = ""
+	pcall(function()
+		local c = inst[prop]
+		if typeof(c) == "Content" then
+			uri = c.Uri or ""
+		elseif type(c) == "string" then
+			uri = c
+		end
+	end)
+	return uri
+end
+
 local function meshIdOf(inst)
 	if inst:IsA("MeshPart") then
-		return inst.MeshId, inst
+		local id = ""
+		pcall(function()
+			id = inst.MeshId
+		end)
+		if id == "" then
+			id = contentUri(inst, "MeshContent")
+		end
+		return id, inst
 	elseif inst:IsA("SpecialMesh") then
 		if inst.MeshType == Enum.MeshType.FileMesh then
 			return inst.MeshId, inst.Parent
@@ -1014,12 +1035,23 @@ local function meshIdOf(inst)
 	return nil, nil
 end
 
+-- The asset number in rbxassetid://123, https://assetdelivery.roblox.com/v1/asset/?id=123,
+-- rbxasset://meshtools/123.mesh ... (not the "1" in "v1")
 local function idFrom(meshId)
-	local id = meshId and string.match(meshId, "%d+")
+	if type(meshId) ~= "string" or meshId == "" then
+		return nil
+	end
+	local id = string.match(meshId, "[?&][iI][dD]=(%d+)")
 	if id and #id >= 5 then
 		return id
 	end
-	return nil
+	local best = nil
+	for run in string.gmatch(meshId, "%d+") do
+		if #run >= 5 and (not best or #run > #best) then
+			best = run
+		end
+	end
+	return best
 end
 
 -- Outermost Model (ignores Workspace and services)
@@ -2544,6 +2576,7 @@ local function texturesOf(meshInst, owner)
 	pcall(function()
 		if meshInst:IsA("MeshPart") then
 			add(meshInst.TextureID)
+			add(contentUri(meshInst, "TextureContent"))
 		elseif meshInst:IsA("FileMesh") then
 			add(meshInst.TextureId)
 		end
@@ -2972,7 +3005,7 @@ local function buildLocal()
 
 			for _, d in ipairs(all) do
 				if d:IsA("MeshPart") then
-					local id = idFrom(d.MeshId)
+					local id = idFrom((meshIdOf(d)))
 					if id and ready[id] then
 						local newPart, err = convertMeshPart(d, id)
 						if not newPart then
@@ -3357,7 +3390,7 @@ local function scanModelParts(roots)
 				partCount = partCount + 1
 				local meshId = nil
 				if d:IsA("MeshPart") then
-					meshId = d.MeshId
+					meshId = (meshIdOf(d))
 				else
 					local sm = d:FindFirstChildWhichIsA("FileMesh")
 					if sm then
