@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '4.3'
+$AppVersion = '4.4'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -957,7 +957,7 @@ function Get-LibraryData {
         $e = $script:index[$id]
         $meshes.Add(@{
             id = $id; name = [string]$e.name; file = $e.file; version = $e.version; verts = $e.verts; tris = $e.tris
-            bones = $e.bones; size = $e.size; bytes = $e.bytes; date = $e.date
+            bones = $e.bones; size = $e.size; bytes = $e.bytes; date = $e.date; source = [string]$e.source
             look = (Test-Path -LiteralPath (Join-Path $LookDir "$id.rbxm"))
         })
     }
@@ -1457,6 +1457,111 @@ $script:lastPing = [DateTime]::MinValue
 $script:boundsCache = @{}
 $script:runNames = @{}
 $script:uploads = @{}
+
+# ---------------- Blender (Send to Studio add-on) ----------------
+$script:blenderEvents = New-Object System.Collections.Generic.List[object]
+$script:blenderTex = @{}        # texture hash -> file name in library\textures
+$script:blenderHist = @{}       # object key -> mesh ids sent this session (newest last)
+$script:blenderLog = @{}        # object key -> last time we logged it
+$script:blenderSeq = 0
+
+# New numeric id for every send, so Studio never shows an old cached copy.
+function New-BlenderId([string]$prefix) {
+    $script:blenderSeq = ($script:blenderSeq + 1) % 100
+    return $prefix + (Get-Date).ToString('yyMMddHHmmss') + $script:blenderSeq.ToString('00')
+}
+function Read-BodyBytes($ctx) {
+    $ms = New-Object IO.MemoryStream
+    $ctx.Request.InputStream.CopyTo($ms)
+    return ,$ms.ToArray()
+}
+function Read-Meta($ctx) {
+    $h = [string]$ctx.Request.Headers['X-Meta']
+    if (-not $h) { return $null }
+    return ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($h)) | ConvertFrom-Json)
+}
+
+function Receive-BlenderTexture($ctx) {
+    $m = Read-Meta $ctx
+    $hash = [string]$m.hash
+    if ($hash -notmatch '^[0-9a-f]{8,40}$') { Send-Json $ctx @{ ok = $false; error = 'bad texture hash' } 400; return }
+    [byte[]]$bytes = Read-BodyBytes $ctx
+    $name = Install-Texture (New-BlenderId '8') $bytes
+    if (-not $name) { Send-Json $ctx @{ ok = $false; error = 'texture must be a PNG or JPG' } 400; return }
+    $script:blenderTex[$hash] = $name
+    Send-Json $ctx @{ ok = $true; file = $name }
+}
+
+function Receive-BlenderMesh($ctx) {
+    $m = Read-Meta $ctx
+    [byte[]]$bytes = Read-BodyBytes $ctx
+    $key = [string]$m.key
+    if ($key -notmatch '^[0-9a-f]{6,40}$') { Send-Json $ctx @{ ok = $false; error = 'bad object key' } 400; return }
+    if (-not $TglInstall.IsChecked) { Send-Json $ctx @{ ok = $false; error = "Turn on 'Install meshes into Studio' in Mesh Downloader" } 409; return }
+    if ($script:studioDirs.Count -eq 0) { $script:studioDirs = @(Get-StudioContentDirs) }
+    if ($script:studioDirs.Count -eq 0) { Send-Json $ctx @{ ok = $false; error = "Mesh Downloader can't find Roblox Studio" } 409; return }
+
+    # texture first: the add-on only sends the image when we don't have it yet
+    $tex = $null
+    $th = [string]$m.texHash
+    if ($th) {
+        $tex = $script:blenderTex[$th]
+        if (-not $tex -or -not (Test-Path -LiteralPath (Join-Path $TexDir $tex))) {
+            Send-Json $ctx @{ ok = $true; needTexture = $true }
+            return
+        }
+    }
+
+    if ($bytes.Length -lt 25 -or [Text.Encoding]::ASCII.GetString($bytes, 0, 12) -ne 'version 2.00') {
+        Send-Json $ctx @{ ok = $false; error = 'not a version 2.00 .mesh' } 400; return
+    }
+    $id = New-BlenderId '9'
+    Install-Mesh $id $bytes
+    $name = Clean-Field ([string]$m.name)
+    if (-not $name) { $name = 'Blender mesh' }
+
+    # keep only the newest copy of this object in the library (and Inserter)
+    foreach ($old in @($script:index.Keys)) {
+        $e = $script:index[$old]
+        if ($old -ne $id -and [string]$e.blender -eq $key) {
+            $script:index.Remove($old)
+            try { Remove-Item -LiteralPath (Join-Path $LibDir "$old.mesh") -Force -ErrorAction Stop } catch { }
+        }
+    }
+    $entry = New-IndexEntry $name $null $bytes ((Get-Date).ToString('yyyy-MM-dd HH:mm'))
+    $entry.source = 'blender'; $entry.blender = $key
+    $script:index[$id] = $entry
+    Save-Index
+
+    # Studio's copies: keep the last 3 versions of each object (parts may still be showing them)
+    if (-not $script:blenderHist.ContainsKey($key)) { $script:blenderHist[$key] = New-Object System.Collections.Generic.List[string] }
+    $hist = $script:blenderHist[$key]
+    $hist.Add($id)
+    while ($hist.Count -gt 3) {
+        $gone = $hist[0]; $hist.RemoveAt(0)
+        foreach ($d in $script:studioDirs) {
+            try { Remove-Item -LiteralPath (Join-Path $d "meshtools\$gone.mesh") -Force -ErrorAction Stop } catch { }
+        }
+    }
+
+    # tell the plugin (only the newest event per object is kept)
+    for ($i = $script:blenderEvents.Count - 1; $i -ge 0; $i--) {
+        if ($script:blenderEvents[$i].key -eq $key) { $script:blenderEvents.RemoveAt($i) }
+    }
+    $script:blenderEvents.Add(@{
+        id = $id; key = $key; name = $name; texture = $tex
+        center = @([double]$m.center[0], [double]$m.center[1], [double]$m.center[2])
+        size = @([double]$m.size[0], [double]$m.size[1], [double]$m.size[2])
+    })
+    Send-Json $ctx @{ ok = $true; id = $id }
+
+    $now = Get-Date
+    $last = $script:blenderLog[$key]
+    if (-not $last -or ($now - $last).TotalSeconds -ge 15) {
+        $script:blenderLog[$key] = $now
+        Log ("Blender: got '{0}' ({1}), waiting for Studio to pick it up." -f $name, (Format-Size $bytes.Length))
+    }
+}
 $script:modelBytesCache = @{ key = $null; bytes = $null }
 $script:tickCount = 0
 
@@ -1560,6 +1665,15 @@ function Handle-Request($ctx) {
                 missing     = [object[]]$missing.ToArray()
             }
             Log ("Studio asked for {0} mesh(es): {1} ready, {2} not downloaded." -f ($installed.Count + $missing.Count), $installed.Count, $missing.Count)
+            return
+        }
+        if ($path -eq '/blender/mesh' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderMesh $ctx; return }
+        if ($path -eq '/blender/texture' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderTexture $ctx; return }
+        if ($path -eq '/blender/next') {
+            $script:lastPing = Get-Date
+            $ev = [object[]]$script:blenderEvents.ToArray()
+            $script:blenderEvents.Clear()
+            Send-Json $ctx @{ ok = $true; events = $ev }
             return
         }
         if ($path -eq '/library') {

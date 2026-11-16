@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v4.3
+ROBLOX MESH TOOLS v4.4
 ======================
 
 What's in here
@@ -7,6 +7,7 @@ What's in here
   MeshDownloader.ico          The app's icon
   RobloxMeshDownloader.ps1    The Mesh Downloader app
   MeshCollector.lua           The Studio plugin (the app installs it for you)
+  mesh_tools_blender.py       Blender add-on: Send to Studio (install it in Blender)
   version.json                Used by the auto-updater
 
 --------------------------------------------------
@@ -105,7 +106,51 @@ Layout:     Grid boxes or List rows, details on cards, max items,
 Previews:   open on hover (off by default) + hover wait, grow/shrink
             speed, ignore clicks right after it opens, spin + speed,
             lighting
-Naming, Pivots, Collector options, Reset all settings
+Naming, Pivots, Blender, Collector options, Reset all settings
+
+--------------------------------------------------
+BLENDER -> STUDIO (no upload, no moderation)
+--------------------------------------------------
+Sends a mesh from Blender straight into Studio as a local .mesh file. It's
+private and instant: nothing goes to Roblox.
+
+Install the add-on (once):
+  1. Blender > Edit > Preferences > Add-ons.
+  2. Click the down-arrow (top right) > "Install from Disk..."
+     (older Blender: the "Install..." button).
+  3. Go to the folder you installed Mesh Downloader in and pick
+     mesh_tools_blender.py. Tick the box next to
+     "Roblox Mesh Tools - Send to Studio" if it isn't ticked.
+  4. In the 3D view press N > "Roblox" tab.
+
+Use it:
+  1. Open Mesh Downloader (Install meshes into Studio + Listen for Studio
+     plugin both on) and Roblox Studio with your place open.
+  2. In Blender select your object(s) > "Send to Studio".
+  3. Within about a second a MeshPart appears in Studio in the same spot as
+     in Blender, with the texture plugged into Base Color.
+  4. Change it in Blender and press Send again - the SAME part updates
+     (anything you moved, turned or resized in Studio is kept).
+  Live: turn it on and objects you've sent once resend by themselves after
+     you stop changing them for "Wait" seconds.
+  Unlink (chain button): the next send makes a new part instead.
+
+Options (Send to Studio > Options):
+  Studs per metre   1 = a 2 m cube becomes 2 studs. Roblox's docs count
+                    1 stud as 0.28 m, so 3.57 = real-world size.
+  Flip texture vertically  on by default; turn off if the texture is
+                    upside-down.
+  Flip faces        turn on if the mesh looks inside-out.
+  Turn around (180) Blender's front lands on Roblox's back (same as an FBX
+                    export). Turn on to face Roblox's front.
+  Apply modifiers, Send texture, Port.
+
+Plugin settings (Settings tab > Blender): receive on/off, add new objects,
+select on arrival, keep my Studio moves.
+
+Right now: one mesh + one texture per object, no bones yet (they're next).
+Each send gets a new number so Studio never shows an old cached copy; the
+library keeps only the newest one, and Studio's folder keeps the last 3.
 
 --------------------------------------------------
 APP OPTIONS

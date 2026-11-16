@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "4.3" -- keep in sync with version.json
+local PLUGIN_VERSION = "4.4" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -59,6 +59,11 @@ local DEFAULTS = {
 	pivotMode = "middle", -- middle | average
 	pivotScope = "both", -- model | parts | both
 	pivotOnInsert = false, -- reset pivots when building / saving / inserting
+	-- Blender (Send to Studio add-on)
+	blenderReceive = true, -- pick up meshes sent from Blender
+	blenderInsert = true, -- put new Blender objects into the scene (off = only update parts already there)
+	blenderSelect = true, -- select a part when it first arrives
+	blenderKeepMoves = true, -- keep where you moved / how you resized a part in Studio when Blender resends it
 	-- appearance
 	uiScale = 100, -- percent
 	theme = "studio", -- studio | dark | classic | midnight
@@ -4409,6 +4414,14 @@ local function buildSettingsPage(ctx)
 	add(dimText("Model only keeps every mesh's own pivot (offsets stay). Parts only moves each mesh's pivot to its own centre. The originals are always saved on the objects, so Restore pivots puts them back - even after saving or inserting.", nx(), 10))
 	add(toggle("Reset pivots when building / saving / inserting", "pivotOnInsert", nx()))
 
+	add(sectionTitle("Blender", nx()))
+	add(dimText("Meshes sent with the Send to Studio add-on in Blender. They load from your PC - nothing is uploaded.", nx(), 10))
+	add(toggle("Receive meshes from Blender", "blenderReceive", nx()))
+	add(toggle("Add new Blender objects to the scene", "blenderInsert", nx()))
+	add(toggle("Select a part when it arrives", "blenderSelect", nx()))
+	add(toggle("Keep my Studio moves when Blender resends", "blenderKeepMoves", nx()))
+	add(dimText("Off = every resend snaps the part back to where it is in Blender.", nx(), 10))
+
 	add(sectionTitle("Collector", nx()))
 	add(toggle("Live (follow what I click)", "live", nx(), rerenderAll))
 	add(toggle("Download right away when sent", "autoStart", nx()))
@@ -4483,6 +4496,185 @@ Studio.ThemeChanged:Connect(function()
 		rerenderAll()
 	end
 end)
+
+-- =================================================================
+-- Blender: meshes sent with the "Send to Studio" add-on
+-- =================================================================
+do
+	local function blenderParts(key)
+		local list = {}
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("MeshPart") and d:GetAttribute("BlenderKey") == key then
+				table.insert(list, d)
+			end
+		end
+		return list
+	end
+
+	local function vec(t)
+		if type(t) ~= "table" then
+			return Vector3.zero
+		end
+		return Vector3.new(tonumber(t[1]) or 0, tonumber(t[2]) or 0, tonumber(t[3]) or 0)
+	end
+
+	local function stamp(p, ev, center, size)
+		p:SetAttribute("BlenderKey", ev.key)
+		p:SetAttribute("BlenderObject", tostring(ev.name))
+		p:SetAttribute("BlenderCenter", center)
+		p:SetAttribute("BlenderSize", size)
+		p:SetAttribute("BlenderMeshId", tostring(ev.id))
+	end
+
+	-- Puts the new mesh on a part that's already in the scene
+	local function updatePart(p, ev, center, size)
+		local fresh, err = createLocalMeshPart(ev.id, p)
+		if not fresh then
+			return nil, err
+		end
+		local cf = CFrame.new(center)
+		local newSize = fresh.Size
+		local oldCenter = p:GetAttribute("BlenderCenter")
+		local oldSize = p:GetAttribute("BlenderSize")
+		if S.blenderKeepMoves and typeof(oldCenter) == "Vector3" then
+			-- follow the change from Blender, but keep wherever you moved / turned it in Studio
+			cf = p.CFrame * CFrame.new(center - oldCenter)
+			if typeof(oldSize) == "Vector3" then
+				local function ratio(a, b)
+					return (b > 1e-4) and (a / b) or 1
+				end
+				newSize = newSize * Vector3.new(ratio(p.Size.X, oldSize.X), ratio(p.Size.Y, oldSize.Y), ratio(p.Size.Z, oldSize.Z))
+			end
+		end
+		local tex = ev.texture and (LOCAL_PREFIX .. "textures/" .. ev.texture) or nil
+
+		-- 1) swap the mesh in place (keeps the same part, scripts, welds ...)
+		local swapped = pcall(function()
+			p:ApplyMesh(fresh)
+		end)
+		if swapped then
+			fresh:Destroy()
+			p.Size = newSize
+			p.CFrame = cf
+			if tex then
+				p.TextureID = tex
+			end
+			stamp(p, ev, center, size)
+			return p
+		end
+
+		-- 2) otherwise replace the part, keeping its settings and children
+		for _, prop in ipairs(COPY_PROPS) do
+			if prop ~= "Size" and prop ~= "CFrame" and prop ~= "PivotOffset" and prop ~= "TextureID" then
+				pcall(function()
+					fresh[prop] = p[prop]
+				end)
+			end
+		end
+		fresh.TextureID = tex or p.TextureID
+		copyAttributesAndTags(p, fresh)
+		fresh.Size = newSize
+		fresh.CFrame = cf
+		for _, child in ipairs(p:GetChildren()) do
+			pcall(function()
+				child.Parent = fresh
+			end)
+		end
+		stamp(fresh, ev, center, size)
+		fresh.Parent = p.Parent
+		local sel = Selection:Get()
+		local wasSelected = false
+		for i, v in ipairs(sel) do
+			if v == p then
+				sel[i] = fresh
+				wasSelected = true
+			end
+		end
+		p:Destroy()
+		if wasSelected then
+			Selection:Set(sel)
+		end
+		return fresh
+	end
+
+	local function handleBlender(ev)
+		if type(ev) ~= "table" or type(ev.key) ~= "string" or not tostring(ev.id or ""):match("^%d+$") then
+			return
+		end
+		ev.id = tostring(ev.id)
+		local center, size = vec(ev.center), vec(ev.size)
+		local existing = blenderParts(ev.key)
+		if #existing == 0 and not S.blenderInsert then
+			return
+		end
+		local finish = beginRecording("Blender: " .. tostring(ev.name))
+		local done, firstErr = 0, nil
+		if #existing > 0 then
+			for _, p in ipairs(existing) do
+				local ok, err = updatePart(p, ev, center, size)
+				if ok then
+					done = done + 1
+				else
+					firstErr = firstErr or err
+				end
+			end
+		else
+			local p, err = createLocalMeshPart(ev.id, nil)
+			if p then
+				p.Name = tostring(ev.name)
+				p.Anchored = true
+				p.CFrame = CFrame.new(center)
+				if ev.texture then
+					p.TextureID = LOCAL_PREFIX .. "textures/" .. ev.texture
+				end
+				stamp(p, ev, center, size)
+				p.Parent = workspace
+				done = 1
+				if S.blenderSelect then
+					Selection:Set({ p })
+				end
+				print(string.format("[Mesh Tools] Blender: added %s (local mesh, nothing uploaded)", p.Name))
+				if ins and ins.widget.Enabled and refreshInserter then
+					task.defer(refreshInserter)
+				end
+			else
+				firstErr = err
+			end
+		end
+		finish(done > 0)
+		if firstErr then
+			warn(string.format("[Mesh Tools] Blender: couldn't load %s - %s", tostring(ev.name), tostring(firstErr)))
+		end
+	end
+
+	task.spawn(function()
+		local fails = 0
+		while alive do
+			local waitFor = 1
+			if S.blenderReceive and not RunService:IsRunning() then
+				local ok, res = request("GET", "/blender/next")
+				if ok then
+					fails = 0
+					local d = decodeBody(res)
+					if d and type(d.events) == "table" then
+						for _, ev in ipairs(d.events) do
+							local okH, e = pcall(handleBlender, ev)
+							if not okH then
+								warn("[Mesh Tools] Blender: " .. tostring(e))
+							end
+						end
+					end
+				else
+					fails = fails + 1
+					waitFor = math.min(5, 1 + fails) -- app closed: check less often
+				end
+			else
+				waitFor = 2
+			end
+			task.wait(waitFor)
+		end
+	end)
+end
 
 -- Downloader status + update check (only while a window is open)
 task.spawn(function()
