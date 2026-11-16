@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v4.2
+ROBLOX MESH TOOLS v4.3
 ======================
 
 What's in here

@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "4.2" -- keep in sync with version.json
+local PLUGIN_VERSION = "4.3" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -816,6 +816,8 @@ local function sectionTitle(str, order)
 	return f
 end
 
+local b64encode, b64decode
+do
 -------------------------------------------------------------------
 -- Base64 (for sending models to / from the app)
 -------------------------------------------------------------------
@@ -828,7 +830,7 @@ for i = 1, 64 do
 end
 local EQ = string.byte("=")
 
-local function b64encode(buf)
+b64encode = function(buf)
 	local n = buffer.len(buf)
 	local out = buffer.create(math.ceil(n / 3) * 4)
 	local i, o = 0, 0
@@ -858,7 +860,7 @@ local function b64encode(buf)
 	return buffer.tostring(out)
 end
 
-local function b64decode(str)
+b64decode = function(str)
 	local len = #str
 	if len == 0 then
 		return buffer.create(0)
@@ -888,6 +890,8 @@ local function b64decode(str)
 		o = o + 3
 	end
 	return out
+end
+
 end
 
 -------------------------------------------------------------------
@@ -1614,6 +1618,8 @@ switchTab = function(ctx, name, instant)
 	end
 end
 
+local registerThumbList, resetThumbs, stripScripts, orbitCamera, newViewport, frameContent, attachPop, closePop, cardContainer, card, groupHeader, makeNote, clearRows, scrollList
+do
 -------------------------------------------------------------------
 -- 3D previews
 --  * every card has a small spinning preview
@@ -1626,18 +1632,18 @@ local thumbLists = {} -- list -> { ctx, thumbs }
 local loadingThumbs = 0
 local MAX_LOADING = 2
 
-local function registerThumbList(list, ctx)
+registerThumbList = function(list, ctx)
 	thumbLists[list] = { ctx = ctx, thumbs = {} }
 end
 
-local function resetThumbs(list)
+resetThumbs = function(list)
 	local e = thumbLists[list]
 	if e then
 		e.thumbs = {}
 	end
 end
 
-local function stripScripts(inst)
+stripScripts = function(inst)
 	for _, d in ipairs(inst:GetDescendants()) do
 		if d:IsA("LuaSourceContainer") then
 			pcall(function()
@@ -1658,7 +1664,7 @@ local function setupLighting(vp, cam)
 	end
 end
 
-local function orbitCamera(o)
+orbitCamera = function(o)
 	local fov = math.rad(o.cam.FieldOfView)
 	local dist = (o.radius / math.sin(fov / 2)) * o.zoom
 	local rot = CFrame.Angles(0, o.yaw, 0) * CFrame.Angles(-o.pitch, 0, 0)
@@ -1668,7 +1674,7 @@ local function orbitCamera(o)
 	end
 end
 
-local function newViewport(props)
+newViewport = function(props)
 	local vp = new("ViewportFrame", props)
 	bind(vp, "BackgroundColor3", "preview")
 	local cam = Instance.new("Camera")
@@ -1681,7 +1687,7 @@ local function newViewport(props)
 	return vp, cam, world
 end
 
-local function frameContent(o, holder)
+frameContent = function(o, holder)
 	local ok, cf, size = pcall(function()
 		return holder:GetBoundingBox()
 	end)
@@ -1741,7 +1747,7 @@ local function popButton(label_, primary)
 	return b
 end
 
-local function attachPop(ctx)
+attachPop = function(ctx)
 	local layer = new("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 40 })
 	layer.Parent = ctx.widget
 	local box = new("Frame", { Visible = false, ZIndex = 41 }, { corner(1.5) })
@@ -1840,7 +1846,6 @@ local function attachPop(ctx)
 	return pop
 end
 
-local closePop -- forward
 
 local function rebuildPopBar(pop, t)
 	for _, c in ipairs(pop.bar:GetChildren()) do
@@ -2137,7 +2142,7 @@ local function listRowHeight()
 	return math.max(small + 10, 10 + th + dh)
 end
 
-local function cardContainer(list, order)
+cardContainer = function(list, order)
 	local f = new("Frame", {
 		Size = UDim2.new(1, 0, 0, 0),
 		AutomaticSize = Enum.AutomaticSize.Y,
@@ -2172,7 +2177,7 @@ end
 
 -- o = { title, lines, selected, onClick, loader, badge, onBadge, actions,
 --       editTitle (text to edit), onRename(newText), onDrag(cardFrame, startPos) }
-local function card(container, list, order, o)
+card = function(container, list, order, o)
 	local grid = S.layout == "grid"
 	local c = new("TextButton", {
 		Text = "",
@@ -2336,7 +2341,7 @@ local function card(container, list, order, o)
 end
 
 -- Full-width header row (optionally with a turning arrow)
-local function groupHeader(list, order, label_, onClick, open)
+groupHeader = function(list, order, label_, onClick, open)
 	local row = new("TextButton", {
 		Size = UDim2.new(1, 0, 0, 28),
 		AutoButtonColor = false,
@@ -2371,11 +2376,11 @@ local function groupHeader(list, order, label_, onClick, open)
 	return row
 end
 
-local function makeNote(parent, str, order)
+makeNote = function(parent, str, order)
 	text({ Size = UDim2.new(1, 0, 0, 34), TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center, Text = str, LayoutOrder = order }, 12, "regular", "dim").Parent = parent
 end
 
-local function clearRows(frame)
+clearRows = function(frame)
 	for _, child in ipairs(frame:GetChildren()) do
 		if child:IsA("GuiObject") then
 			child:Destroy()
@@ -2383,7 +2388,7 @@ local function clearRows(frame)
 	end
 end
 
-local function scrollList(order)
+scrollList = function(order)
 	local list = new("ScrollingFrame", {
 		Size = UDim2.new(1, 0, 0, 160),
 		CanvasSize = UDim2.new(0, 0, 0, 0),
@@ -2399,20 +2404,28 @@ local function scrollList(order)
 	return list
 end
 
+end
+
+-- Names shared between the Collector, Inserter and Settings blocks
+-- (each block is wrapped in do ... end so Roblox's per-script variable limit isn't hit)
+local col, ins
+local refresh, queueRefresh, refreshInserter, renderInserter, rerenderAll, applyInfoPos
+local collectButton, openInserterButton
+local frozenSelection = {}
+local suppressLiveUntil = 0
+
+-- ===== COLLECTOR BLOCK =====
+do
 -- =================================================================
 -- MESH COLLECTOR
 -- =================================================================
-local col = makeWidget("MeshCollectorV2", "Mesh Collector  v" .. PLUGIN_VERSION, 380, 700, { "Collector", "Settings" })
+col = makeWidget("MeshCollectorV2", "Mesh Collector  v" .. PLUGIN_VERSION, 380, 700, { "Collector", "Settings" })
 attachPop(col)
 local colPage = col.pages.Collector
 
 local summary = dimText("Select a model or part in Explorer.", 1)
 summary.Parent = colPage
 
-local refresh -- forward
-local queueRefresh -- forward
-local refreshInserter -- forward
-local rerenderAll -- forward
 
 dimText("Name files by", 2, 11).Parent = colPage
 segmented(3, {
@@ -2425,7 +2438,7 @@ segmented(3, {
 	refresh()
 end, 11).Parent = colPage
 
-local collectButton = button("Collect current selection", "secondary", 4)
+collectButton = button("Collect current selection", "secondary", 4)
 collectButton.Visible = not S.live
 collectButton.Parent = colPage
 
@@ -2450,7 +2463,7 @@ table.insert(controlRenderers, function()
 	pivotText.Text = pivotSummary() .. " Originals are saved - Restore puts them back."
 end)
 local copyButton = button("Copy list", "secondary")
-local openInserterButton = button("Open Inserter", "secondary")
+openInserterButton = button("Open Inserter", "secondary")
 buttonRow(11, { copyButton, openInserterButton }).Parent = colPage
 
 local statusLine = dimText("", 12, 11)
@@ -2509,9 +2522,7 @@ closeOverlay.MouseButton1Click:Connect(function()
 end)
 
 -- Collecting ------------------------------------------------------------
-local frozenSelection = {}
 local currentEntries = {}
-local suppressLiveUntil = 0
 local colSelected = nil
 local colCards = {} -- part -> card
 
@@ -3090,10 +3101,28 @@ local function buildLocal()
 	end
 end
 buildButton.MouseButton1Click:Connect(buildLocal)
+
+collectButton.MouseButton1Click:Connect(function()
+	frozenSelection = Selection:Get()
+	refresh()
+end)
+
+Selection.SelectionChanged:Connect(function()
+	if os.clock() < suppressLiveUntil then
+		return
+	end
+	if S.live and col.widget.Enabled and col.current == "Collector" then
+		queueRefresh()
+	end
+end)
+end -- COLLECTOR BLOCK
+
+-- ===== INSERTER BLOCK =====
+do
 -- =================================================================
 -- MESH INSERTER
 -- =================================================================
-local ins = makeWidget("MeshInserterV3", "Mesh Inserter", 400, 720, { "Library", "Settings" })
+ins = makeWidget("MeshInserterV3", "Mesh Inserter", 400, 720, { "Library", "Settings" })
 attachPop(ins)
 local insPage = ins.pages.Library
 
@@ -3165,7 +3194,7 @@ local function setInsStatus(str, color)
 	end
 end
 
-local function applyInfoPos()
+applyInfoPos = function()
 	infoBlock.LayoutOrder = (S.infoPos == "top") and 2 or 5
 	pivotRow.LayoutOrder = 3
 end
@@ -3188,7 +3217,6 @@ local meshTemplates = {}
 local selected = nil
 local selectToken = 0
 local insCards = {} -- item/part table -> card
-local renderInserter -- forward
 
 local function fmtBytes(n)
 	n = tonumber(n) or 0
@@ -4217,9 +4245,12 @@ RunService.Heartbeat:Connect(function()
 	gh.frame.Position = UDim2.fromOffset(gh.pos.X, gh.pos.Y)
 end)
 
+end -- INSERTER BLOCK
+
 -- =================================================================
 -- SETTINGS TAB (same settings in both windows)
 -- =================================================================
+do -- SETTINGS BLOCK
 rerenderAll = function()
 	collectButton.Visible = not S.live
 	applyInfoPos()
@@ -4401,23 +4432,11 @@ end
 
 buildSettingsPage(col)
 buildSettingsPage(ins)
+end -- SETTINGS BLOCK
 
 -- =================================================================
 -- Wiring
 -- =================================================================
-collectButton.MouseButton1Click:Connect(function()
-	frozenSelection = Selection:Get()
-	refresh()
-end)
-
-Selection.SelectionChanged:Connect(function()
-	if os.clock() < suppressLiveUntil then
-		return
-	end
-	if S.live and col.widget.Enabled and col.current == "Collector" then
-		queueRefresh()
-	end
-end)
 
 collectorButton.Click:Connect(function()
 	col.widget.Enabled = not col.widget.Enabled
