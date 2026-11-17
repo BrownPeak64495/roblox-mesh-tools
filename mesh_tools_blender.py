@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 2, 0),
+    "version": (1, 3, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -121,8 +121,9 @@ def _bone_order(arm):
 
 
 # ------------------------------------------------------------------ mesh data
-def _read_mesh(obj, depsgraph, props, arm):
-    """Corner-level data in Blender world space (+ per-corner bone weights when skinned)."""
+def _read_mesh(obj, depsgraph, props, arm, want_tangents=False):
+    """Corner-level data in Blender world space (+ per-corner bone weights when skinned,
+    + tangents for normal maps)."""
     src = obj.evaluated_get(depsgraph) if props.apply_modifiers else obj
     me = src.to_mesh()
     try:
@@ -145,6 +146,18 @@ def _read_mesh(obj, depsgraph, props, arm):
             uv = uv.reshape(-1, 2)
         else:
             uv = np.zeros((len(me.loops), 2), dtype=np.float32)
+
+        tan = None
+        if want_tangents and uv_layer is not None:
+            try:
+                me.calc_tangents(uvmap=uv_layer.name)
+                t = np.empty(len(me.loops) * 3, dtype=np.float32)
+                me.loops.foreach_get("tangent", t)
+                sgn = np.empty(len(me.loops), dtype=np.float32)
+                me.loops.foreach_get("bitangent_sign", sgn)
+                tan = (t.reshape(-1, 3), sgn)
+            except Exception:
+                tan = None
 
         weights = None
         if arm is not None:
@@ -171,7 +184,16 @@ def _read_mesh(obj, depsgraph, props, arm):
     length[length == 0] = 1
     nrm /= length
     tuv = uv[tri_loops].astype(np.float64)
-    return pos, nrm, tuv, corner_v, weights, np.linalg.det(m3) < 0
+    mirrored = np.linalg.det(m3) < 0
+    # tangent (x, y, z) + sign: normal maps need them. Stored like Roblox does: (value + 1) * 127
+    tng = np.zeros((len(tri_loops), 4), dtype=np.float64)
+    if tan is not None:
+        t = tan[0][tri_loops].astype(np.float64) @ m3.T
+        ln = np.linalg.norm(t, axis=1, keepdims=True)
+        ln[ln == 0] = 1
+        tng[:, 0:3] = t / ln
+        tng[:, 3] = tan[1][tri_loops] * (-1 if mirrored else 1)
+    return pos, nrm, tuv, tng, corner_v, weights, mirrored
 
 
 def _skin_table(weights, bone_index, fallback):
@@ -197,7 +219,7 @@ def _skin_table(weights, bone_index, fallback):
     return idx, wts, over
 
 
-def build_mesh(obj, depsgraph, props):
+def build_mesh(obj, depsgraph, props, normal_map=False):
     """Returns (bytes, info). info: center, size, verts, tris, bones (or None), over4."""
     arm = find_armature(obj) if props.send_bones else None
     if arm is not None:
@@ -206,20 +228,22 @@ def build_mesh(obj, depsgraph, props):
         arm.data.pose_position = "REST"
         bpy.context.view_layer.update()
         try:
-            pos, nrm, tuv, corner_v, weights, mirrored = _read_mesh(obj, bpy.context.evaluated_depsgraph_get(), props, arm)
+            pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, bpy.context.evaluated_depsgraph_get(), props, arm, True)
         finally:
             arm.data.pose_position = old
             bpy.context.view_layer.update()
     else:
-        pos, nrm, tuv, corner_v, weights, mirrored = _read_mesh(obj, depsgraph, props, None)
+        pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, depsgraph, props, None, normal_map)
 
     ax = _axis_matrix(props)
     pos = (pos @ ax.T) * props.studs_per_meter
     nrm = nrm @ ax.T
+    tng[:, 0:3] = tng[:, 0:3] @ ax.T
     if props.flip_v:
         tuv[:, 1] = 1.0 - tuv[:, 1]
 
-    cols = [np.round(pos, 5), np.round(nrm, 4), np.round(tuv, 5)]
+    # columns: 0-2 position, 3-5 normal, 6-7 uv, 8-11 tangent, 12-15 bone ids, 16-19 weights
+    cols = [np.round(pos, 5), np.round(nrm, 4), np.round(tuv, 5), np.round(tng, 3)]
     bones = None
     over = 0
     if arm is not None:
@@ -243,8 +267,10 @@ def build_mesh(obj, depsgraph, props):
     verts[:, 0:3] -= center
     info = {"center": [float(c) for c in center], "size": [float(s) for s in (hi - lo)], "over4": over}
 
-    if arm is None:
+    if arm is None and not normal_map:
         data = _write_v2(verts, faces)
+    elif arm is None:
+        data, _, _ = _write_v7(verts, faces, None)     # normal map: needs tangents, which 2.00 can't hold
     else:
         aw = np.array(arm.matrix_world, dtype=np.float64)
         bones = []
@@ -253,7 +279,7 @@ def build_mesh(obj, depsgraph, props):
             p = (ax @ head) * props.studs_per_meter - center
             parent = bone_index[b.parent.name] if b.parent else -1
             bones.append({"n": b.name, "p": parent, "x": float(p[0]), "y": float(p[1]), "z": float(p[2])})
-        data, verts_n, faces_n = _write_v7(verts, faces, bones)
+        data, _, _ = _write_v7(verts, faces, bones)
         info["arm"] = arm.name
         info["bones"] = bones
         info["order"] = [b.name for b in order]
@@ -284,11 +310,26 @@ def _chunk(name, version, payload):
     return name.ljust(8, b"\0") + struct.pack("<II", version, len(payload)) + payload
 
 
+def _tangent_bytes(t):
+    return np.clip(np.round((t + 1.0) * 127.0), 0, 254).astype(np.uint8)
+
+
 def _write_v7(verts, faces, bones):
-    """version 7.00 with COREMESH (uncompressed), LODS and SKINNING - tested in Studio with
-    Roblox's own dynamic head rebuilt this way."""
-    skin_idx = verts[:, 8:12].astype(np.int64)
-    skin_w = verts[:, 12:16].astype(np.int64)
+    """version 7.00 with COREMESH (uncompressed), LODS and SKINNING (when bones) - tested in
+    Studio with Roblox's own dynamic head rebuilt this way."""
+    if not bones:
+        nv, nf = len(verts), len(faces)
+        va = np.zeros(nv, dtype=_VDT)
+        va["p"] = verts[:, 0:3]
+        va["n"] = verts[:, 3:6]
+        va["uv"] = verts[:, 6:8]
+        va["t"] = _tangent_bytes(verts[:, 8:12])
+        va["c"] = 255
+        core = struct.pack("<I", nv) + va.tobytes() + struct.pack("<I", nf) + faces.astype("<u4").tobytes()
+        lods = struct.pack("<HBI", 0, 1, 2) + struct.pack("<II", 0, nf)
+        return (b"version 7.00\n" + _chunk(b"COREMESH", 1, core) + _chunk(b"LODS", 1, lods)), nv, nf
+    skin_idx = verts[:, 12:16].astype(np.int64)
+    skin_w = verts[:, 16:20].astype(np.int64)
 
     # Roblox needs the mesh in sections of at most 26 bones each
     face_bones = []
@@ -341,7 +382,7 @@ def _write_v7(verts, faces, bones):
     va["p"] = V[:, 0:3]
     va["n"] = V[:, 3:6]
     va["uv"] = V[:, 6:8]
-    va["t"] = 127
+    va["t"] = _tangent_bytes(V[:, 8:12])
     va["c"] = 255
     core = struct.pack("<I", nv) + va.tobytes() + struct.pack("<I", nf) + F.tobytes()
     lods = struct.pack("<HBI", 0, 1, 2) + struct.pack("<II", 0, nf)
@@ -428,29 +469,24 @@ def send_pose(obj, props):
     return bool(res.get("ok"))
 
 
-# ------------------------------------------------------------------ texture
-def _find_image(obj):
-    best = None
-    for slot in obj.material_slots:
-        mat = slot.material
-        if not mat or not mat.use_nodes or not mat.node_tree:
-            continue
-        for node in mat.node_tree.nodes:
-            if node.type == "BSDF_PRINCIPLED":
-                inp = node.inputs.get("Base Color")
-                if inp and inp.is_linked:
-                    src = inp.links[0].from_node
-                    if src.type == "TEX_IMAGE" and src.image:
-                        return src.image
-        for node in mat.node_tree.nodes:
-            if node.type == "TEX_IMAGE" and node.image and best is None:
-                best = node.image
-    return best
+# ------------------------------------------------------------------ material
+def _image_upstream(sock, depth=0):
+    """The image feeding this input (through Mix / Hue / Gamma ... nodes too)."""
+    if sock is None or not sock.is_linked or depth > 5:
+        return None
+    node = sock.links[0].from_node
+    if node.type == "TEX_IMAGE":
+        return node.image
+    for inp in node.inputs:
+        if inp.type in ("RGBA", "VALUE", "VECTOR"):
+            img = _image_upstream(inp, depth + 1)
+            if img is not None:
+                return img
+    return None
 
 
-def get_texture(obj):
-    """Returns (bytes, ext) of the object's base colour image, or (None, None)."""
-    img = _find_image(obj)
+def _image_bytes(img):
+    """(bytes, ext) of a Blender image as PNG/JPG."""
     if img is None:
         return None, None
     if img.packed_file is not None:
@@ -467,7 +503,7 @@ def get_texture(obj):
     # anything else (generated, painted, .tga, .exr ...) -> save a PNG copy
     if not img.has_data and img.size[0] == 0:
         return None, None
-    tmp = os.path.join(tempfile.gettempdir(), "roblox_mesh_tools_tex.png")
+    tmp = os.path.join(tempfile.gettempdir(), "roblox_mesh_tools_tex_%s.png" % hashlib.sha1(img.name.encode()).hexdigest()[:8])
     scene = bpy.context.scene
     fmt = scene.render.image_settings.file_format
     try:
@@ -479,29 +515,87 @@ def get_texture(obj):
         return f.read(), ".png"
 
 
+def _to_srgb(c):
+    c = max(0.0, min(1.0, float(c)))
+    return c * 12.92 if c <= 0.0031308 else 1.055 * (c ** (1 / 2.4)) - 0.055
+
+
+def get_material(obj):
+    """What Roblox can show of the object's first material:
+    maps (color / normal / roughness / metalness images), see-through, plain colour, both sides."""
+    out = {"maps": {}, "alpha": False, "tint": None, "double": True}
+    mat = None
+    for slot in obj.material_slots:
+        if slot.material is not None:
+            mat = slot.material
+            break
+    if mat is None:
+        return out
+    out["double"] = not getattr(mat, "use_backface_culling", False)
+    if not mat.use_nodes or not mat.node_tree:
+        out["tint"] = [_to_srgb(c) for c in mat.diffuse_color[:3]]
+        return out
+    nodes = mat.node_tree.nodes
+    bsdf = next((n for n in nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if bsdf is None:
+        img = next((n.image for n in nodes if n.type == "TEX_IMAGE" and n.image), None)
+        if img is not None:
+            out["maps"]["color"] = img
+        return out
+    base = bsdf.inputs.get("Base Color")
+    img = _image_upstream(base)
+    if img is not None:
+        out["maps"]["color"] = img
+    elif base is not None and not base.is_linked:
+        out["tint"] = [_to_srgb(c) for c in base.default_value[:3]]
+    alpha = bsdf.inputs.get("Alpha")
+    if alpha is not None and (alpha.is_linked or alpha.default_value < 0.999):
+        out["alpha"] = True
+    nrm = bsdf.inputs.get("Normal")
+    if nrm is not None and nrm.is_linked:
+        node = nrm.links[0].from_node
+        if node.type == "NORMAL_MAP":
+            nimg = _image_upstream(node.inputs.get("Color"))
+            if nimg is not None:
+                out["maps"]["normal"] = nimg
+    for name, kind in (("Roughness", "roughness"), ("Metallic", "metalness")):
+        sock = bsdf.inputs.get(name)
+        if sock is not None and sock.is_linked and sock.links[0].from_node.type == "TEX_IMAGE":
+            out["maps"][kind] = sock.links[0].from_node.image
+    return out
+
+
 # ------------------------------------------------------------------ sending
 def send_object(obj, props, depsgraph):
-    data, info = build_mesh(obj, depsgraph, props)
+    look = get_material(obj) if props.send_texture else {"maps": {}, "alpha": False, "tint": None, "double": True}
+    data, info = build_mesh(obj, depsgraph, props, normal_map="normal" in look["maps"])
     key = obj.get(KEY_PROP)
     if not key:
         key = hashlib.sha1(("%s|%f" % (obj.name, time.time())).encode()).hexdigest()[:16]
         obj[KEY_PROP] = key
 
-    tex, ext, th = None, None, ""
-    if props.send_texture:
-        tex, ext = get_texture(obj)
-        if tex:
-            th = hashlib.sha1(tex).hexdigest()[:20]
+    # pictures: each one is only sent if Mesh Downloader doesn't have it yet
+    maps, blobs = [], {}
+    for kind, img in look["maps"].items():
+        b, ext = _image_bytes(img)
+        if b:
+            h = hashlib.sha1(b).hexdigest()[:20]
+            maps.append({"kind": kind, "hash": h, "ext": ext})
+            blobs[h] = (b, ext)
 
     meta = {"key": key, "name": obj.name, "center": info["center"], "size": info["size"],
-            "texHash": th, "texExt": ext or ""}
+            "maps": maps, "alpha": look["alpha"], "double": look["double"]}
+    if look["tint"] is not None:
+        meta["tint"] = look["tint"]
     if info.get("bones"):
         meta["bones"] = info["bones"]
     res = _post(props, "/blender/mesh", meta, data)
-    if res.get("needTexture") and tex:
-        r2 = _post(props, "/blender/texture", {"hash": th, "ext": ext}, tex)
-        if not r2.get("ok"):
-            raise RuntimeError("Texture: " + str(r2.get("error")))
+    if res.get("needTextures"):
+        for h in res["needTextures"]:
+            if h in blobs:
+                r2 = _post(props, "/blender/texture", {"hash": h, "ext": blobs[h][1]}, blobs[h][0])
+                if not r2.get("ok"):
+                    raise RuntimeError("Texture: " + str(r2.get("error")))
         res = _post(props, "/blender/mesh", meta, data)
     if not res.get("ok"):
         raise RuntimeError(str(res.get("error") or "Mesh Downloader said no"))
@@ -653,7 +747,8 @@ class RMT_Props(bpy.types.PropertyGroup):
         description="Blender's front (-Y) becomes Roblox's front (-Z), the way Roblox's own character meshes are stored. Off = same as a plain FBX export (front ends up facing backwards)")
     apply_modifiers: bpy.props.BoolProperty(name="Apply modifiers", default=True)
     send_texture: bpy.props.BoolProperty(
-        name="Send texture", default=True, description="Sends the image plugged into Base Color")
+        name="Send material", default=True,
+        description="Sends the Base Color picture (or colour), Normal / Roughness / Metallic pictures, see-through and both-sides settings")
     send_bones: bpy.props.BoolProperty(
         name="Send bones", default=True,
         description="Objects with an Armature get its bones and weights, so they bend in Studio")

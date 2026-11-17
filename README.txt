@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v4.9
+ROBLOX MESH TOOLS v5.0
 ======================
 
 What's in here
@@ -170,7 +170,22 @@ part, named like your Blender bones.
     "Send pose" sends it once by hand.
   - Selecting the armature and pressing Send sends the meshes it moves.
   - Face controls (dynamic faces) are not made yet - bones first.
-Right now: one texture per object.
+MATERIAL (Options > Send material, on by default) - from the Principled BSDF
+of the object's first material:
+  - Base Color picture -> texture (or, with no picture, the part's Color)
+  - Normal Map / Roughness / Metallic pictures -> a SurfaceAppearance
+    ("MeshToolsLook") with those maps
+  - Alpha plugged in (or below 1) -> see-through: SurfaceAppearance with
+    AlphaMode Transparency, so clear pixels really are clear
+  - Backface Culling off (Blender's default) -> DoubleSided, so thin cards,
+    leaves and hair show from behind like in Blender
+  - New parts use SmoothPlastic (Roblox's Plastic adds a faint pattern) and
+    full detail at any distance
+  If you add your own SurfaceAppearance in Studio, it's left alone.
+  Colours look different? Blender shows colours through a "View Transform"
+  (AgX or Filmic by default) that Roblox doesn't use. To compare fairly:
+  Render Properties > Color Management > View Transform = Standard.
+  Procedural (node) textures have no picture to send - bake them first.
 Each send gets a new number so Studio never shows an old cached copy; the
 library keeps only the newest one, and Studio's folder keeps the last 3.
 
@@ -185,9 +200,10 @@ Mesh Inserter > "Import .obj" (next to Refresh):
      with its texture. Nothing is uploaded.
   3. They also show up in the Inserter library for later.
 Notes: OBJ from Blender's default export already faces the right way. Only
-the shape + texture (no bones - use the Blender add-on for those). The
-texture is matched by the name in the .mtl; with one .obj and one picture it
-just uses that picture.
+the shape + material (no bones - use the Blender add-on for those). From the
+.mtl: map_Kd (colour picture), map_Bump / norm (normal picture), d / Tr /
+map_d (see-through -> both sides shown), Kd (colour). Pictures are matched by
+the names in the .mtl; with one .obj and one picture it just uses that one.
 
 --------------------------------------------------
 APP OPTIONS

@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '4.9'
+$AppVersion = '5.0'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1523,16 +1523,19 @@ function Receive-BlenderMesh($ctx) {
     if ($script:studioDirs.Count -eq 0) { $script:studioDirs = @(Get-StudioContentDirs) }
     if ($script:studioDirs.Count -eq 0) { Send-Json $ctx @{ ok = $false; error = "Mesh Downloader can't find Roblox Studio" } 409; return }
 
-    # texture first: the add-on only sends the image when we don't have it yet
-    $tex = $null
-    $th = [string]$m.texHash
-    if ($th) {
-        $tex = $script:blenderTex[$th]
-        if (-not $tex -or -not (Test-Path -LiteralPath (Join-Path $TexDir $tex))) {
-            Send-Json $ctx @{ ok = $true; needTexture = $true }
-            return
-        }
+    # pictures first: the add-on only sends the ones we don't have yet
+    $maps = @{}
+    $need = New-Object System.Collections.Generic.List[string]
+    foreach ($mp in @($m.maps)) {
+        if (-not $mp) { continue }
+        $h = [string]$mp.hash
+        $kind = [string]$mp.kind
+        if ($h -notmatch '^[0-9a-f]{8,40}$' -or $kind -notmatch '^(color|normal|roughness|metalness)$') { continue }
+        $f = $script:blenderTex[$h]
+        if (-not $f -or -not (Test-Path -LiteralPath (Join-Path $TexDir $f))) { $need.Add($h) } else { $maps[$kind] = $f }
     }
+    if ($need.Count -gt 0) { Send-Json $ctx @{ ok = $true; needTextures = [object[]]$need.ToArray() }; return }
+    $tex = $maps['color']
 
     $head = ''
     if ($bytes.Length -ge 25) { $head = [Text.Encoding]::ASCII.GetString($bytes, 0, 12) }
@@ -1578,6 +1581,10 @@ function Receive-BlenderMesh($ctx) {
         size = @([double]$m.size[0], [double]$m.size[1], [double]$m.size[2])
     }
     if ($m.bones) { $ev.bones = @($m.bones) }
+    $ev.maps = $maps
+    $ev.alpha = [bool]$m.alpha
+    $ev.double = [bool]$m.double
+    if ($m.tint) { $ev.tint = @([double]$m.tint[0], [double]$m.tint[1], [double]$m.tint[2]) }
     $script:blenderEvents.Add($ev)
     Send-Json $ctx @{ ok = $true; id = $id }
 

@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "4.9" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.0" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1364,9 +1364,12 @@ local COPY_PROPS = {
 	"CollisionGroup", "CustomPhysicalProperties", "RootPriority", "Archivable", "TextureID",
 }
 
-local function createLocalMeshPart(id, mp)
+local function createLocalMeshPart(id, mp, extra)
 	local uri = LOCAL_PREFIX .. id .. ".mesh"
 	local options = {}
+	for k, v in pairs(extra or {}) do
+		options[k] = v
+	end
 	if mp then
 		pcall(function()
 			options.CollisionFidelity = mp.CollisionFidelity
@@ -1388,6 +1391,60 @@ local function createLocalMeshPart(id, mp)
 	end
 	return nil, tostring(res)
 end
+
+-- Look for parts made from Blender / .obj: colour picture, or a SurfaceAppearance when
+-- there are normal / roughness / metal pictures or see-through parts, plain colour,
+-- and both sides (Blender shows the back of faces unless Backface Culling is on).
+-- look = { maps = { color, normal, roughness, metalness = file names }, alpha, tint = {r,g,b}, double }
+local function applyLocalLook(p, look)
+	local maps = type(look.maps) == "table" and look.maps or {}
+	local function path(f)
+		return f and (LOCAL_PREFIX .. "textures/" .. tostring(f)) or nil
+	end
+	local color = maps.color
+	local useSA = maps.normal or maps.roughness or maps.metalness or (look.alpha and color)
+	local theirs = false
+	for _, d in ipairs(p:GetChildren()) do
+		if d:IsA("SurfaceAppearance") then
+			if d:GetAttribute("MeshToolsLook") then
+				d:Destroy()
+			else
+				theirs = true -- you added your own: leave it alone
+			end
+		end
+	end
+	if useSA and not theirs then
+		local sa = Instance.new("SurfaceAppearance")
+		sa.Name = "MeshToolsLook"
+		sa:SetAttribute("MeshToolsLook", true)
+		for prop, f in pairs({ ColorMap = color, NormalMap = maps.normal, RoughnessMap = maps.roughness, MetalnessMap = maps.metalness }) do
+			pcall(function()
+				sa[prop] = path(f)
+			end)
+		end
+		pcall(function()
+			sa.AlphaMode = look.alpha and Enum.AlphaMode.Transparency or Enum.AlphaMode.Overlay
+		end)
+		sa.Parent = p
+		pcall(function()
+			p.TextureID = ""
+		end)
+	elseif color then
+		pcall(function()
+			p.TextureID = path(color)
+		end)
+	end
+	if not color and type(look.tint) == "table" then
+		p.Color = Color3.new(tonumber(look.tint[1]) or 1, tonumber(look.tint[2]) or 1, tonumber(look.tint[3]) or 1)
+	end
+	if look.double ~= nil then
+		pcall(function()
+			p.DoubleSided = look.double and true or false
+		end)
+	end
+end
+
+local LOCAL_PART_OPTIONS = { RenderFidelity = Enum.RenderFidelity.Precise } -- full detail at any distance
 
 local function copyAttributesAndTags(from, to)
 	pcall(function()
@@ -4751,23 +4808,47 @@ do
 		return b, { verts = nv, tris = nf, center = center, mtllib = mtllib, usemtl = usemtl }
 	end
 
-	-- texture file named in the .mtl (map_Kd) for the material the .obj uses
-	local function textureFromMtl(src, wanted)
-		local maps, first, cur = {}, nil, nil
+	-- what the .mtl says about the material the .obj uses: pictures (map_Kd colour,
+	-- map_Bump / norm normal), see-through (d < 1, Tr > 0 or map_d) and colour (Kd)
+	local function mtlLook(src, wanted)
+		local mats, first, cur = {}, nil, nil
+		local function fileOf(rest)
+			local file = rest
+			if string.sub(file, 1, 1) == "-" then -- options before the file name
+				file = string.match(rest, "(%S+)$") or rest
+			end
+			return baseName(file)
+		end
 		for line in string.gmatch(src, "[^\r\n]+") do
 			local kind, rest = string.match(line, "^%s*(%S+)%s*(.-)%s*$")
+			kind = kind and string.lower(kind)
 			if kind == "newmtl" then
-				cur = rest
-			elseif kind and string.lower(kind) == "map_kd" and cur then
-				local file = rest
-				if string.sub(file, 1, 1) == "-" then -- options before the file name
-					file = string.match(rest, "(%S+)$") or rest
+				cur = { maps = {} }
+				mats[rest] = cur
+				first = first or cur
+			elseif cur and kind == "map_kd" then
+				cur.maps.color = fileOf(rest)
+			elseif cur and (kind == "map_bump" or kind == "bump" or kind == "norm") then
+				cur.maps.normal = fileOf(rest)
+			elseif cur and kind == "map_d" then
+				cur.alpha = true
+			elseif cur and kind == "d" and (tonumber(rest) or 1) < 0.999 then
+				cur.alpha = true
+			elseif cur and kind == "tr" and (tonumber(rest) or 0) > 0.001 then
+				cur.alpha = true
+			elseif cur and kind == "kd" then
+				local r, g, bb = string.match(rest, "^(%S+)%s+(%S+)%s+(%S+)")
+				if r then
+					-- .mtl colours are linear (like Blender's); Roblox colours are sRGB
+					local function srgb(c)
+						c = math.clamp(tonumber(c) or 1, 0, 1)
+						return c <= 0.0031308 and c * 12.92 or 1.055 * c ^ (1 / 2.4) - 0.055
+					end
+					cur.tint = { srgb(r), srgb(g), srgb(bb) }
 				end
-				maps[cur] = baseName(file)
-				first = first or maps[cur]
 			end
 		end
-		return (wanted and maps[wanted]) or first
+		return (wanted and mats[wanted]) or first
 	end
 
 	local function pickFiles()
@@ -4831,34 +4912,41 @@ do
 			if not okU then
 				return nil, d
 			end
-			-- texture: the one its .mtl names, or the only picture you picked
-			local texFile = nil
-			local img = nil
-			for _, m in ipairs(mtls) do
-				local t = textureFromMtl(m:GetBinaryContents(), info.usemtl)
-				if t and imgs[string.lower(t)] then
-					img = imgs[string.lower(t)]
+			-- material: what its .mtl names (pictures you picked), or the only picture you picked
+			local mat = nil
+			for _, mf in ipairs(mtls) do
+				mat = mtlLook(mf:GetBinaryContents(), info.usemtl)
+				if mat then
 					break
 				end
 			end
-			if not img and #objs == 1 then
-				img = imgs[1]
-			end
-			if img then
-				local okT, dt = uploadToApp(buffer.fromstring(img:GetBinaryContents()), name, "texture")
-				if okT and dt.file then
-					texFile = dt.file
+			local look = { maps = {}, alpha = mat and mat.alpha or false, tint = mat and mat.tint or nil }
+			local pics = {}
+			if mat then
+				for kind, file in pairs(mat.maps) do
+					pics[kind] = imgs[string.lower(file)]
 				end
 			end
-			local part, err = createLocalMeshPart(d.id, nil)
+			if not pics.color and #objs == 1 and imgs[1] and imgs[1] ~= pics.normal then
+				pics.color = imgs[1]
+			end
+			for kind, img in pairs(pics) do
+				local okT, dt = uploadToApp(buffer.fromstring(img:GetBinaryContents()), name, "texture")
+				if okT and dt.file then
+					look.maps[kind] = dt.file
+				end
+			end
+			if look.alpha then
+				look.double = true -- see-through cards / leaves: show both sides
+			end
+			local part, err = createLocalMeshPart(d.id, nil, LOCAL_PART_OPTIONS)
 			if not part then
 				return nil, err
 			end
 			part.Name = name
 			part.Anchored = true
-			if texFile then
-				part.TextureID = LOCAL_PREFIX .. "textures/" .. texFile
-			end
+			part.Material = Enum.Material.SmoothPlastic
+			applyLocalLook(part, look)
 			-- in front of the camera; several files keep their places relative to each other
 			if not anchor then
 				local sz = part.Size
@@ -5246,7 +5334,7 @@ do
 
 	-- Puts the new mesh on a part that's already in the scene
 	local function updatePart(p, ev, center, size)
-		local fresh, err = createLocalMeshPart(ev.id, p)
+		local fresh, err = createLocalMeshPart(ev.id, p, LOCAL_PART_OPTIONS)
 		if not fresh then
 			return nil, err
 		end
@@ -5264,8 +5352,6 @@ do
 				newSize = newSize * Vector3.new(ratio(p.Size.X, oldSize.X), ratio(p.Size.Y, oldSize.Y), ratio(p.Size.Z, oldSize.Z))
 			end
 		end
-		local tex = ev.texture and (LOCAL_PREFIX .. "textures/" .. ev.texture) or nil
-
 		-- 1) swap the mesh in place (keeps the same part, scripts, welds ...)
 		local swapped = pcall(function()
 			p:ApplyMesh(fresh)
@@ -5274,9 +5360,7 @@ do
 			fresh:Destroy()
 			p.Size = newSize
 			p.CFrame = cf
-			if tex then
-				p.TextureID = tex
-			end
+			applyLocalLook(p, ev)
 			stamp(p, ev, center, size)
 			buildBones(p, ev.bones)
 			return p
@@ -5290,7 +5374,7 @@ do
 				end)
 			end
 		end
-		fresh.TextureID = tex or p.TextureID
+		fresh.TextureID = p.TextureID
 		copyAttributesAndTags(p, fresh)
 		fresh.Size = newSize
 		fresh.CFrame = cf
@@ -5299,6 +5383,7 @@ do
 				child.Parent = fresh
 			end)
 		end
+		applyLocalLook(fresh, ev)
 		stamp(fresh, ev, center, size)
 		buildBones(fresh, ev.bones)
 		fresh.Parent = p.Parent
@@ -5346,14 +5431,13 @@ do
 				end
 			end
 		else
-			local p, err = createLocalMeshPart(ev.id, nil)
+			local p, err = createLocalMeshPart(ev.id, nil, LOCAL_PART_OPTIONS)
 			if p then
 				p.Name = tostring(ev.name)
 				p.Anchored = true
+				p.Material = Enum.Material.SmoothPlastic -- Roblox's Plastic has a faint pattern Blender doesn't
 				p.CFrame = CFrame.new(center)
-				if ev.texture then
-					p.TextureID = LOCAL_PREFIX .. "textures/" .. ev.texture
-				end
+				applyLocalLook(p, ev)
 				stamp(p, ev, center, size)
 				buildBones(p, ev.bones)
 				p.Parent = workspace
