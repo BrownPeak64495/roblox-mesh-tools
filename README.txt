@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v4.8
+ROBLOX MESH TOOLS v4.9
 ======================
 
 What's in here
@@ -59,10 +59,19 @@ Buttons:
 --------------------------------------------------
 MESH INSERTER (Studio)  - tabs: Library | Settings
 --------------------------------------------------
-MODELS - press + (or "Show meshes" in the big view) to inspect a model:
-         a big 3D view of it appears with its meshes as cards below.
-         Click a part in the 3D view -> its card is found and selected.
-         Click a card -> that part lights up in the 3D view.
+MODELS - press + (or "Open" in the big view) to open a model: its card
+         grows into a model view right where it was.
+           left:  3D view - click a part to pick it (the name of the part
+                  under the mouse shows at the top), click empty space for
+                  the whole model, drag to rotate, scroll to zoom
+           right: the picked part (mesh ID, size, path) + Insert part,
+                  and the list of the model's meshes - click to pick,
+                  drag one into the scene to place it
+           top:   Insert model, X to close
+         Picked part: X-ray fades the other parts; Outline keeps them and
+         draws an outline (Settings > Model view; the outline can also be
+         on in X-ray). Invisible parts like HumanoidRootPart are skipped,
+         so you can click what's behind them.
 MESHES - every downloaded .mesh ("textured" = its look was saved)
 "When inserting: Keep pivots / Reset pivots" sits at the top.
 
@@ -76,7 +85,7 @@ right-click to cancel.
 --------------------------------------------------
   click the preview  -> it grows into a big view (hover can do this too:
                         Settings > "Also open the big view on hover")
-  big view buttons   -> Keep open, Insert, Show meshes (models), X
+  big view buttons   -> Keep open, Insert, Open (models), X
   drag               -> rotate,  scroll -> zoom
   corner "//"        -> drag to resize the big view
 While the mouse is over the big view, nothing behind it can be clicked or

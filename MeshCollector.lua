@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "4.8" -- keep in sync with version.json
+local PLUGIN_VERSION = "4.9" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -88,6 +88,10 @@ local DEFAULTS = {
 	clickGuard = 3, -- tenths of a second: clicks ignored right after the big preview opens
 	bigSize = 260,
 	lighting = "follow", -- follow | flat
+	-- model view (Inserter)
+	inspectMode = "xray", -- xray (fade the other parts) | outline (keep them, outline the picked one)
+	inspectOutline = true, -- in X-ray mode, also outline the picked part
+	inspectHeight = 320, -- px
 }
 
 local LEGACY = {
@@ -1713,7 +1717,7 @@ do
 -- 3D previews
 --  * every card has a small spinning preview
 --  * CLICK it (or hover, if turned on in Settings) and it grows into a
---    big view with buttons: Keep open, Insert, Show meshes, close
+--    big view with buttons: Keep open, Insert, Open (models), close
 --  * the big view can be resized from its corner; while your mouse is
 --    over it, nothing behind it can be clicked or scrolled
 -------------------------------------------------------------------
@@ -3605,18 +3609,14 @@ local function showPartInfo(m, p)
 end
 
 
--- Model inspector: a big 3D view of an expanded model. Click a part in it
--- to find (and select) its mesh card; clicking a card highlights the part.
+-- Model view: an opened model grows out of its card into a big 3D view with a side
+-- panel (the picked part + a list of the model's meshes). Click a part in 3D to pick it.
 local inspector = nil
+local justOpened = nil -- model key whose view should grow out of its card
 
 local function inspectorHighlight(p)
-	if not inspector then
-		return
-	end
-	for orig, cl in pairs(inspector.map) do
-		local base = inspector.baseT[cl] or 0
-		local target = (p == nil or p.inst == orig) and base or math.max(base, 0.88)
-		tween(cl, { Transparency = target }, 0.8)
+	if inspector then
+		inspector.pick(p)
 	end
 end
 
@@ -3625,14 +3625,6 @@ local function updateInsHighlights()
 	for k, cd in pairs(insCards) do
 		cd.paint(k == key, true)
 	end
-end
-
-local function scrollToCard(cd)
-	if not cd or not cd.frame.Parent then
-		return
-	end
-	local y = cd.frame.AbsolutePosition.Y - insList.AbsolutePosition.Y + insList.CanvasPosition.Y - 40
-	tween(insList, { CanvasPosition = Vector2.new(0, math.max(0, y)) }, 1.5)
 end
 
 local function selectMesh(m)
@@ -3657,15 +3649,12 @@ local function selectModel(m)
 	end)
 end
 
-local function selectPart(m, p, fromInspector)
+local function selectPart(m, p)
 	selectToken = selectToken + 1
 	selected = { kind = "part", item = m, part = p }
 	showPartInfo(m, p)
 	updateInsHighlights()
 	inspectorHighlight(p)
-	if fromInspector then
-		scrollToCard(insCards[p])
-	end
 end
 
 local function matches(str, filter)
@@ -3675,15 +3664,88 @@ local function matches(str, filter)
 	return string.find(string.lower(tostring(str or "")), filter, 1, true) ~= nil
 end
 
-local function buildInspector(m, cache, order)
-	local frame = new("Frame", { Size = UDim2.new(1, 0, 0, 250), LayoutOrder = order }, { corner(1) })
-	bind(frame, "BackgroundColor3", "panel")
-	stroke().Parent = frame
-	local vp, cam, world = newViewport({ Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 1, -30), Active = true, ZIndex = 2 })
-	corner(1).Parent = vp
-	vp.Parent = frame
-	text({ Position = UDim2.new(0, 10, 1, -22), Size = UDim2.new(1, -20, 0, 18), Text = "Click a part to find its mesh  -  drag to rotate  -  scroll to zoom", TextTruncate = Enum.TextTruncate.AtEnd }, 10, "regular", "dim").Parent = frame
+local startCardDrag -- forward (drag into the 3D view)
+local insertTarget -- forward
 
+local function buildInspector(m, cache, order, grow, filter)
+	local H = S.inspectHeight
+	local frame = new("Frame", { Size = UDim2.new(1, 0, 0, H), LayoutOrder = order, ClipsDescendants = true }, { corner(1) })
+	bind(frame, "BackgroundColor3", "panel")
+	stroke("accent").Parent = frame
+
+	-- header: name, Insert model, close
+	text({ Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -160, 0, 20), Text = m.name, TextTruncate = Enum.TextTruncate.AtEnd }, 13, "bold", "text").Parent = frame
+	local insertModelBtn = button("Insert model", "primary")
+	insertModelBtn.Size = UDim2.fromOffset(104, 24)
+	insertModelBtn.Position = UDim2.new(1, -142, 0, 5)
+	insertModelBtn.Parent = frame
+	local closeBtn = button("X", "secondary")
+	closeBtn.Size = UDim2.fromOffset(30, 24)
+	closeBtn.Position = UDim2.new(1, -35, 0, 5)
+	closeBtn.Parent = frame
+	insertModelBtn.MouseButton1Click:Connect(function()
+		insertTarget({ kind = "model", item = m })
+	end)
+	closeBtn.MouseButton1Click:Connect(function()
+		expanded = {}
+		renderInserter()
+	end)
+
+	if grow then
+		-- grows out of the card it replaced
+		if S.layout == "grid" then
+			frame.Size = UDim2.fromOffset(S.cardSize + 12, S.cardSize + 56)
+		else
+			frame.Size = UDim2.new(1, 0, 0, math.floor(S.cardSize * 0.55) + 10)
+		end
+		tween(frame, { Size = UDim2.new(1, 0, 0, H) }, 1.6, Enum.EasingStyle.Quint)
+	end
+	frame.Parent = insList
+
+	if not cache or cache.loading or cache.err then
+		local msg = (cache and cache.err) or "Loading..."
+		text({ Position = UDim2.fromOffset(10, 36), Size = UDim2.new(1, -20, 1, -46), Text = msg, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Center }, 12, "regular", "dim").Parent = frame
+		return
+	end
+
+	local body = new("Frame", { Position = UDim2.fromOffset(6, 34), Size = UDim2.new(1, -12, 1, -40), BackgroundTransparency = 1 })
+	body.Parent = frame
+	local vp, cam, world = newViewport({ Size = UDim2.new(0.62, -3, 1, 0), Active = true, ZIndex = 2, ClipsDescendants = true })
+	corner(1).Parent = vp
+	vp.Parent = body
+	local hover = text({ Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 0, 16), Text = "", ZIndex = 6, TextTruncate = Enum.TextTruncate.AtEnd }, 11, "bold", "text")
+	hover.Parent = vp
+	text({ Position = UDim2.new(0, 8, 1, -20), Size = UDim2.new(1, -16, 0, 16), Text = "Click a part  -  drag to rotate  -  scroll to zoom", ZIndex = 6, TextTruncate = Enum.TextTruncate.AtEnd }, 10, "regular", "dim").Parent = vp
+
+	-- side panel
+	local side = new("Frame", { Position = UDim2.new(0.62, 3, 0, 0), Size = UDim2.new(0.38, -3, 1, 0), BackgroundTransparency = 1 })
+	side.Parent = body
+	local infoBox = new("Frame", { Size = UDim2.new(1, 0, 0, 78) }, { corner(1), padding(6, 8, 6, 8) })
+	bind(infoBox, "BackgroundColor3", "card")
+	infoBox.Parent = side
+	local partName = text({ Size = UDim2.new(1, 0, 0, 16), Text = "", TextTruncate = Enum.TextTruncate.AtEnd }, 12, "bold", "text")
+	partName.Parent = infoBox
+	local partInfo = text({ Position = UDim2.fromOffset(0, 18), Size = UDim2.new(1, 0, 1, -18), Text = "", TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, TextTruncate = Enum.TextTruncate.AtEnd }, 10, "regular", "dim")
+	partInfo.Parent = infoBox
+	local insertPartBtn = button("Insert part", "primary")
+	insertPartBtn.Size = UDim2.new(1, 0, 0, 26)
+	insertPartBtn.Position = UDim2.fromOffset(0, 84)
+	insertPartBtn.Parent = side
+	local listLabel = text({ Position = UDim2.fromOffset(2, 116), Size = UDim2.new(1, -4, 0, 14), Text = "" }, 10, "bold", "dim")
+	listLabel.Parent = side
+	local partList = new("ScrollingFrame", {
+		Position = UDim2.fromOffset(0, 132),
+		Size = UDim2.new(1, 0, 1, -132),
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollBarThickness = 4,
+		BorderSizePixel = 0,
+		BackgroundTransparency = 1,
+	}, { new("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }) })
+	bind(partList, "ScrollBarImageColor3", "dim")
+	partList.Parent = side
+
+	-- the 3D copy of the model
 	local holder = Instance.new("Model")
 	local map, back, baseT = {}, {}, {}
 	for _, r in ipairs(cache.roots) do
@@ -3708,6 +3770,9 @@ local function buildInspector(m, cache, order)
 	stripScripts(holder)
 	for _, cl in pairs(map) do
 		baseT[cl] = cl.Transparency
+		pcall(function()
+			cl.CanQuery = true
+		end)
 	end
 	for _, p in ipairs(cache.parts or {}) do
 		local cl = map[p.inst]
@@ -3715,18 +3780,230 @@ local function buildInspector(m, cache, order)
 			back[cl] = p
 		end
 	end
-	local insp = { vp = vp, cam = cam, world = world, map = map, back = back, baseT = baseT, radius = 2, yaw = 0.6, pitch = 0.35, zoom = 1 }
+	local insp = { vp = vp, cam = cam, radius = 2, yaw = 0.6, pitch = 0.35, zoom = 1 }
 	frameContent(insp, holder)
 	holder.Parent = world
-	orbitCamera(insp)
+
+	-- outline: the picked part drawn again on top, plus 8 accent-coloured copies nudged
+	-- 2px around it. ViewportFrames can't show Highlights, so this is how it gets an edge.
+	local outline = nil
+	local function clearOutline()
+		if outline then
+			for _, o in ipairs(outline) do
+				o.vp:Destroy()
+			end
+			outline = nil
+		end
+	end
+	local function buildOutline(cl)
+		clearOutline()
+		if not cl or not (S.inspectMode == "outline" or S.inspectOutline) then
+			return
+		end
+		outline = {}
+		local function overlay(dx, dy, sil)
+			local copy = nil
+			pcall(function()
+				copy = cl:Clone()
+			end)
+			if not copy then
+				return
+			end
+			local ov = Instance.new("ViewportFrame")
+			ov.BackgroundTransparency = 1
+			ov.Size = UDim2.new(1, 0, 1, 0)
+			ov.Position = UDim2.fromOffset(dx, dy)
+			ov.ZIndex = sil and 3 or 4
+			ov.Active = false
+			pcall(function()
+				ov.Interactable = false
+			end)
+			local c2 = Instance.new("Camera")
+			c2.FieldOfView = cam.FieldOfView
+			c2.CFrame = cam.CFrame
+			c2.Parent = ov
+			ov.CurrentCamera = c2
+			if sil then
+				for _, ch in ipairs(copy:GetDescendants()) do
+					if ch:IsA("SurfaceAppearance") or ch:IsA("Decal") or ch:IsA("Texture") then
+						ch:Destroy()
+					end
+				end
+				pcall(function()
+					copy.TextureID = ""
+				end)
+				copy.Color = WHITE
+				copy.Material = Enum.Material.SmoothPlastic
+				copy.Reflectance = 0
+				copy.Transparency = 0
+				ov.Ambient = WHITE
+				ov.LightColor = rgb(0, 0, 0)
+				ov.ImageColor3 = T("accent")
+			else
+				copy.Transparency = baseT[cl] or 0
+				ov.Ambient = vp.Ambient
+				ov.LightColor = vp.LightColor
+				ov.LightDirection = vp.LightDirection
+			end
+			copy.Parent = ov
+			ov.Parent = vp
+			table.insert(outline, { vp = ov, cam = c2, sil = sil })
+		end
+		for _, d in ipairs({ { -2, 0 }, { 2, 0 }, { 0, -2 }, { 0, 2 }, { -2, -2 }, { 2, 2 }, { -2, 2 }, { 2, -2 } }) do
+			overlay(d[1], d[2], true)
+		end
+		overlay(0, 0, false)
+	end
+	local function orbit()
+		orbitCamera(insp)
+		if outline then
+			for _, o in ipairs(outline) do
+				o.cam.CFrame = cam.CFrame
+				if not o.sil then
+					o.vp.LightDirection = vp.LightDirection
+				end
+			end
+		end
+	end
+	orbit()
+
+	-- side list of the model's meshes
+	local rows = {}
+	local function paintRow(row, on)
+		row.BackgroundColor3 = on and T("accent") or T("card")
+		row.TextColor3 = on and T("accentText") or T("text")
+	end
+	local shown = 0
+	for i, p in ipairs(cache.parts or {}) do
+		if filter == "" or matches(m.name, filter) or matches(p.name, filter) or matches(p.id, filter) then
+			shown = shown + 1
+			local row = new("TextButton", {
+				Size = UDim2.new(1, -6, 0, 22),
+				Text = "  " .. p.name,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				AutoButtonColor = false,
+				LayoutOrder = i,
+			}, { corner(0.5) })
+			bindText(row, 11, "regular")
+			paintRow(row, false)
+			row.Parent = partList
+			rows[p] = row
+			local downPos, dragged = nil, false
+			row.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					downPos, dragged = input.Position, false
+				end
+			end)
+			row.InputChanged:Connect(function(input)
+				if downPos and input.UserInputType == Enum.UserInputType.MouseMovement then
+					local d = input.Position - downPos
+					if math.abs(d.X) + math.abs(d.Y) > 10 then
+						downPos, dragged = nil, true
+						startCardDrag(ins, row, { kind = "part", item = m, part = p }, p.name)
+					end
+				end
+			end)
+			row.InputEnded:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					downPos = nil
+				end
+			end)
+			row.MouseButton1Click:Connect(function()
+				if dragged then
+					dragged = false
+					return
+				end
+				selectPart(m, p)
+			end)
+		end
+	end
+	listLabel.Text = string.format("MESHES (%d)  -  click to pick, drag to place", shown)
+
+	local picked = nil
+	local function pick(p)
+		picked = p
+		for orig, cl in pairs(map) do
+			local base = baseT[cl] or 0
+			local target = base
+			if p and S.inspectMode ~= "outline" and orig ~= p.inst then
+				target = math.max(base, 0.88)
+			end
+			tween(cl, { Transparency = target }, 0.8)
+		end
+		buildOutline(p and map[p.inst] or nil)
+		if p then
+			local sz = p.inst.Size
+			partName.Text = p.name
+			partInfo.Text = string.format("Mesh ID %s\n%.2f x %.2f x %.2f studs\n%s", p.id, sz.X, sz.Y, sz.Z, p.path)
+			insertPartBtn.Visible = true
+		else
+			partName.Text = "Whole model"
+			partInfo.Text = string.format("%d parts  -  %d meshes\nPick a part in 3D or in the list.", cache.partCount or 0, #(cache.parts or {}))
+			insertPartBtn.Visible = false
+		end
+		for pp, row in pairs(rows) do
+			paintRow(row, pp == p)
+		end
+		-- only the side list scrolls to it - the window stays where it is
+		local row = p and rows[p]
+		if row then
+			task.defer(function()
+				if not row.Parent then
+					return
+				end
+				local top = row.AbsolutePosition.Y - partList.AbsolutePosition.Y + partList.CanvasPosition.Y
+				local viewH = partList.AbsoluteSize.Y
+				local cur = partList.CanvasPosition.Y
+				if top < cur or top + row.AbsoluteSize.Y > cur + viewH then
+					tween(partList, { CanvasPosition = Vector2.new(0, math.max(0, top - viewH / 2)) }, 1.2)
+				end
+			end)
+		end
+	end
+	insertPartBtn.MouseButton1Click:Connect(function()
+		if picked then
+			insertTarget({ kind = "part", item = m, part = picked })
+		end
+	end)
+
+	-- which mesh part is under the mouse (skips invisible parts like HumanoidRootPart)
+	local function partAt(pos)
+		local sz = vp.AbsoluteSize
+		local rx = (pos.X - vp.AbsolutePosition.X) / math.max(sz.X, 1)
+		local ry = (pos.Y - vp.AbsolutePosition.Y) / math.max(sz.Y, 1)
+		local tanY = math.tan(math.rad(cam.FieldOfView) / 2)
+		local aspect = sz.X / math.max(sz.Y, 1)
+		local dir = cam.CFrame:VectorToWorldSpace(Vector3.new((rx * 2 - 1) * tanY * aspect, (1 - ry * 2) * tanY, -1)).Unit
+		local params = RaycastParams.new()
+		params.FilterType = Enum.RaycastFilterType.Exclude
+		local skip = {}
+		for _ = 1, 32 do
+			params.FilterDescendantsInstances = skip
+			local r = world:Raycast(cam.CFrame.Position, dir * 10000, params)
+			if not r then
+				return nil
+			end
+			local p = back[r.Instance]
+			if p and (baseT[r.Instance] or 0) < 0.95 then
+				return p
+			end
+			table.insert(skip, r.Instance)
+		end
+		return nil
+	end
 
 	local dragging, moved, last = false, 0, nil
 	vp.MouseEnter:Connect(function()
-		insList.ScrollingEnabled = false -- scroll = zoom while over the inspector
+		insList.ScrollingEnabled = false -- scroll = zoom while over the 3D view
 	end)
 	vp.MouseLeave:Connect(function()
 		insList.ScrollingEnabled = true
 		dragging = false
+		hover.Text = ""
+	end)
+	frame.Destroying:Connect(function()
+		insList.ScrollingEnabled = true
 	end)
 	vp.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -3734,16 +4011,21 @@ local function buildInspector(m, cache, order)
 		end
 	end)
 	vp.InputChanged:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseMovement and dragging and last then
-			local d = input.Position - last
-			last = input.Position
-			moved = moved + math.abs(d.X) + math.abs(d.Y)
-			insp.yaw = insp.yaw - d.X * 0.012
-			insp.pitch = math.clamp(insp.pitch + d.Y * 0.012, -1.45, 1.45)
-			orbitCamera(insp)
+		if input.UserInputType == Enum.UserInputType.MouseMovement then
+			if dragging and last then
+				local d = input.Position - last
+				last = input.Position
+				moved = moved + math.abs(d.X) + math.abs(d.Y)
+				insp.yaw = insp.yaw - d.X * 0.012
+				insp.pitch = math.clamp(insp.pitch + d.Y * 0.012, -1.45, 1.45)
+				orbit()
+			else
+				local p = partAt(input.Position)
+				hover.Text = p and p.name or ""
+			end
 		elseif input.UserInputType == Enum.UserInputType.MouseWheel then
 			insp.zoom = math.clamp(insp.zoom * (1 - input.Position.Z * 0.12), 0.1, 6)
-			orbitCamera(insp)
+			orbit()
 		end
 	end)
 	vp.InputEnded:Connect(function(input)
@@ -3754,25 +4036,21 @@ local function buildInspector(m, cache, order)
 		if moved > 4 then
 			return
 		end
-		-- click: find the part under the mouse
-		local sz = vp.AbsoluteSize
-		local rx = (input.Position.X - vp.AbsolutePosition.X) / math.max(sz.X, 1)
-		local ry = (input.Position.Y - vp.AbsolutePosition.Y) / math.max(sz.Y, 1)
-		local tanY = math.tan(math.rad(cam.FieldOfView) / 2)
-		local aspect = sz.X / math.max(sz.Y, 1)
-		local dir = cam.CFrame:VectorToWorldSpace(Vector3.new((rx * 2 - 1) * tanY * aspect, (1 - ry * 2) * tanY, -1)).Unit
-		local result = world:Raycast(cam.CFrame.Position, dir * 10000)
-		local p = result and back[result.Instance]
+		local p = partAt(input.Position)
 		if p then
-			selectPart(m, p, true)
+			selectPart(m, p)
+		else
+			selectModel(m) -- clicked empty space: back to the whole model
 		end
 	end)
-	inspector = insp
-	frame.Parent = insList
-end
 
-local startCardDrag -- forward (drag into the 3D view)
-local insertTarget -- forward
+	inspector = { pick = pick }
+	if selected and selected.kind == "part" and selected.item == m then
+		pick(selected.part)
+	else
+		pick(nil)
+	end
+end
 
 renderInserter = function()
 	if not ins.widget.Enabled then
@@ -3801,12 +4079,21 @@ renderInserter = function()
 		expanded = {}
 		if open then
 			expanded[m.key] = true
-			loadModel(m, function()
-				renderInserter()
-			end)
+			justOpened = m.key
 		end
 		renderInserter()
+		if open then
+			local c = modelCache[m.key]
+			if not (c and (c.roots or c.err)) then
+				loadModel(m, function()
+					if expanded[m.key] then
+						renderInserter()
+					end
+				end)
+			end
+		end
 	end
+	infoBlock.Visible = next(expanded) == nil -- the open model view has its own details + buttons
 
 	-- MODELS -------------------------------------------------------------
 	local models = {}
@@ -3833,104 +4120,63 @@ renderInserter = function()
 		if #models == 0 then
 			makeNote(insList, "No saved or downloaded models yet.", nextOrder())
 		else
-			local cont = cardContainer(insList, nextOrder())
+			local cont = nil
 			for i, m in ipairs(models) do
 				if i > S.maxItems then
 					break
 				end
 				local cache = modelCache[m.key]
-				local detail = "press + to inspect its meshes"
-				if cache and cache.roots then
-					detail = string.format("%d parts  -  %d meshes", cache.partCount or 0, #(cache.parts or {}))
-				elseif cache and cache.err then
-					detail = "can't preview (see details)"
-				end
-				local target = { kind = "model", item = m }
-				local cd = card(cont, insList, i, {
-					title = m.name,
-					lines = { fmtBytes(m.bytes) .. "  -  " .. (m.date or ""), detail },
-					selected = selected and selected.kind == "model" and selected.item == m,
-					onClick = function()
-						selectModel(m)
-					end,
-					loader = function(cb)
-						local entry = waitModel(m)
-						if entry and entry.roots then
-							cb(cloneAll(entry.roots))
-						else
-							cb(nil, entry and entry.err)
-						end
-					end,
-					badge = expanded[m.key] and "-" or "+",
-					onBadge = function()
-						expandModel(m)
-					end,
-					actions = {
-						{ text = "Insert", primary = true, closes = true, fn = function()
-							insertTarget(target)
-						end },
-						{ text = expanded[m.key] and "Hide meshes" or "Show meshes", closes = true, fn = function()
-							expandModel(m)
-						end },
-					},
-					onDrag = function(frame)
-						startCardDrag(ins, frame, target, m.name)
-					end,
-				})
-				insCards[m] = cd
-			end
-		end
-
-		-- the expanded model: inspector + its mesh cards
-		for _, m in ipairs(models) do
-			if expanded[m.key] then
-				local cache = modelCache[m.key]
-				local count = (cache and cache.parts) and #cache.parts or 0
-				groupHeader(insList, nextOrder(), string.format("%s  -  %d meshes   (click to close)", m.name, count), function()
-					expanded = {}
-					renderInserter()
-				end)
-				if not cache or cache.loading then
-					makeNote(insList, "Loading...", nextOrder())
-				elseif cache.err then
-					makeNote(insList, cache.err, nextOrder())
-				else
-					buildInspector(m, cache, nextOrder())
-					if #cache.parts == 0 then
-						makeNote(insList, "No meshes in this model.", nextOrder())
-					else
-						local cont = cardContainer(insList, nextOrder())
-						local shown = 0
-						for _, p in ipairs(cache.parts) do
-							if filter == "" or matches(m.name, filter) or matches(p.name, filter) or matches(p.id, filter) then
-								shown = shown + 1
-								if shown > S.maxItems then
-									break
-								end
-								local target = { kind = "part", item = m, part = p }
-								local cd = card(cont, insList, shown, {
-									title = p.name,
-									lines = { p.id .. "  -  " .. p.inst.ClassName, p.path },
-									selected = selected and selected.kind == "part" and selected.part == p,
-									onClick = function()
-										selectPart(m, p)
-									end,
-									loader = function(cb)
-										cb(cloneAll({ p.inst }))
-									end,
-									actions = {
-										{ text = "Insert", primary = true, closes = true, fn = function()
-											insertTarget(target)
-										end },
-									},
-									onDrag = function(frame)
-										startCardDrag(ins, frame, target, p.name)
-									end,
-								})
-								insCards[p] = cd
-							end
-						end
+				if expanded[m.key] then
+					-- the open model takes the card's place, full width
+					local grow = justOpened == m.key
+					if grow and cache and (cache.roots or cache.err) then
+						justOpened = nil
 					end
+					buildInspector(m, cache, nextOrder(), grow, filter)
+					cont = nil
+				else
+					if not cont then
+						cont = cardContainer(insList, nextOrder())
+					end
+					local detail = "press + to open it"
+					if cache and cache.roots then
+						detail = string.format("%d parts  -  %d meshes", cache.partCount or 0, #(cache.parts or {}))
+					elseif cache and cache.err then
+						detail = "can't preview (see details)"
+					end
+					local target = { kind = "model", item = m }
+					local cd = card(cont, insList, i, {
+						title = m.name,
+						lines = { fmtBytes(m.bytes) .. "  -  " .. (m.date or ""), detail },
+						selected = selected and selected.kind == "model" and selected.item == m,
+						onClick = function()
+							selectModel(m)
+						end,
+						loader = function(cb)
+							local entry = waitModel(m)
+							if entry and entry.roots then
+								cb(cloneAll(entry.roots))
+							else
+								cb(nil, entry and entry.err)
+							end
+						end,
+						badge = "+",
+						onBadge = function()
+							expandModel(m)
+						end,
+						actions = {
+							{ text = "Insert", primary = true, closes = true, fn = function()
+								insertTarget(target)
+							end },
+							{ text = "Open", closes = true, fn = function()
+								expandModel(m)
+							end },
+						},
+						onDrag = function(frame)
+							startCardDrag(ins, frame, target, m.name)
+						end,
+					})
+					insCards[m] = cd
 				end
 			end
 		end
@@ -4758,7 +5004,7 @@ local function buildSettingsPage(ctx)
 	}, "infoPos", applyInfoPos))
 
 	add(sectionTitle("3D previews", nx()))
-	add(dimText("Click a preview to open the big view. Its buttons: Keep open, Insert, Show meshes, X.", nx(), 11))
+	add(dimText("Click a preview to open the big view. Its buttons: Keep open, Insert, Open (models), X.", nx(), 11))
 	add(toggle("Also open the big view on hover", "hoverExpand", nx()))
 	add(slider("Hover wait before it opens", "hoverDelay", nx(), 0, 20, 1, secs))
 	add(slider("Grow / shrink speed", "expandSpeed", nx(), 0, 15, 1, secs))
@@ -4772,6 +5018,15 @@ local function buildSettingsPage(ctx)
 		{ key = "follow", text = "Follows view" },
 		{ key = "flat", text = "Flat (no shading)" },
 	}, "lighting", rerenderAll))
+
+	add(sectionTitle("Model view (Inserter)", nx()))
+	add(dimText("When you pick a part in an open model", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "xray", text = "X-ray (fade the rest)" },
+		{ key = "outline", text = "Outline only" },
+	}, "inspectMode", rerenderAll))
+	add(toggle("Also outline the picked part in X-ray", "inspectOutline", nx(), rerenderAll))
+	add(slider("Model view height", "inspectHeight", nx(), 220, 700, 10, px, rerenderAll))
 
 	add(sectionTitle("Naming & saving", nx()))
 	add(dimText("Name files by", nx(), 11))
