@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.1" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.2" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1520,6 +1520,10 @@ local function convertSpecialMesh(host, sm, id)
 		local ok = pcall(function()
 			sa.ColorMap = sm.TextureId
 			sa.AlphaMode = Enum.AlphaMode.Overlay
+		end)
+		pcall(function()
+			local vc = sm.VertexColor -- SpecialMesh tint -> SurfaceAppearance tint
+			sa.Color = Color3.new(math.clamp(vc.X, 0, 1), math.clamp(vc.Y, 0, 1), math.clamp(vc.Z, 0, 1))
 		end)
 		if ok then
 			sa.Parent = p
