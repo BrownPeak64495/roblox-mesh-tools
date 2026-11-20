@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.4" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.5" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1398,13 +1398,21 @@ end
 -- there are normal / roughness / metal pictures or see-through parts, plain colour,
 -- and both sides (Blender shows the back of faces unless Backface Culling is on).
 -- look = { maps = { color, normal, roughness, metalness = file names }, alpha, tint = {r,g,b}, double }
+local LOCAL_SA_PATH = nil -- set once a local folder SurfaceAppearances accept is found
+
 local function applyLocalLook(p, look)
 	local maps = type(look.maps) == "table" and look.maps or {}
 	local function path(f)
 		return f and (LOCAL_PREFIX .. "textures/" .. tostring(f)) or nil
 	end
+	local function saPath(f)
+		return f and (LOCAL_SA_PATH .. tostring(f)) or nil
+	end
 	local color = maps.color
-	local useSA = maps.normal or maps.roughness or maps.metalness or (look.alpha and color)
+	-- SurfaceAppearances can't load pictures from your PC (tested in Studio), so local
+	-- pictures go on TextureID. Normal / roughness / metal pictures need a SurfaceAppearance,
+	-- so they only work once there's a local path Studio accepts for them.
+	local useSA = LOCAL_SA_PATH ~= nil and (maps.normal or maps.roughness or maps.metalness or (look.alpha and color))
 	local theirs = false
 	for _, d in ipairs(p:GetChildren()) do
 		if d:IsA("SurfaceAppearance") then
@@ -1421,7 +1429,7 @@ local function applyLocalLook(p, look)
 		sa:SetAttribute("MeshToolsLook", true)
 		for prop, f in pairs({ ColorMap = color, NormalMap = maps.normal, RoughnessMap = maps.roughness, MetalnessMap = maps.metalness }) do
 			pcall(function()
-				sa[prop] = path(f)
+				sa[prop] = saPath(f)
 			end)
 		end
 		pcall(function()
@@ -3253,14 +3261,9 @@ local function buildLocal()
 					if l then
 						d.TextureId = l
 					end
-				elseif d:IsA("SurfaceAppearance") then
-					for _, prop in ipairs({ "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap" }) do
-						local l = swapTex(d[prop])
-						if l then
-							d[prop] = l
-						end
-					end
 				end
+				-- SurfaceAppearances are left on their Roblox picture IDs: they can't load
+				-- pictures from the meshtools folder on your PC (tested in Studio)
 			end)
 		end
 	end
@@ -3489,16 +3492,8 @@ local function applyLocalTextures(root)
 					d.TextureId = l
 				end)
 			end
-		elseif d:IsA("SurfaceAppearance") then
-			for _, prop in ipairs({ "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap" }) do
-				pcall(function()
-					local l = localTex(d[prop])
-					if l then
-						d[prop] = l
-					end
-				end)
-			end
 		end
+		-- SurfaceAppearances keep their Roblox picture IDs (they can't load local pictures)
 	end
 end
 

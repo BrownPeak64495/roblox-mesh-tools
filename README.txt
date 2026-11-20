@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v5.4
+ROBLOX MESH TOOLS v5.5
 ======================
 
 What's in here
@@ -56,6 +56,9 @@ Buttons:
                            MeshPart, so FaceControls and bones work; its
                            texture goes in a SurfaceAppearance set to
                            Overlay so the skin colour still shows through
+                           (that picture loads from Roblox by its ID -
+                           SurfaceAppearances can't use pictures from your
+                           PC; downloading isn't uploading)
                          everything else -> stays SpecialMesh, only the
                            mesh link changes, so it looks exactly the same
                        (or pick Keep SpecialMesh / Make MeshPart always)
@@ -181,10 +184,10 @@ part, named like your Blender bones.
 MATERIAL (Options > Send material, on by default) - from the Principled BSDF
 of the object's first material:
   - Base Color picture -> texture (or, with no picture, the part's Color)
-  - Normal Map / Roughness / Metallic pictures -> a SurfaceAppearance
-    ("MeshToolsLook") with those maps
-  - Alpha plugged in (or below 1) -> see-through: SurfaceAppearance with
-    AlphaMode Transparency, so clear pixels really are clear
+  - Normal Map / Roughness / Metallic pictures and see-through (Alpha) are
+    sent, but NOT shown yet: they need a SurfaceAppearance, and Studio's
+    SurfaceAppearances won't load pictures from your PC (tested). Being
+    tested: a second local folder (content\textures\meshtools).
   - Backface Culling off (Blender's default) -> DoubleSided, so thin cards,
     leaves and hair show from behind like in Blender
   - New parts use SmoothPlastic (Roblox's Plastic adds a faint pattern) and

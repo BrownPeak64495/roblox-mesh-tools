@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '5.4'
+$AppVersion = '5.5'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -734,13 +734,16 @@ function Sync-Studio([switch]$Quiet) {
                     try { Copy-Item -LiteralPath $f.FullName -Destination $dest; $copied++ } catch { }
                 }
             }
-            $tt = Join-Path $t 'textures'
-            foreach ($f in @(Get-ChildItem $TexDir -File -ErrorAction SilentlyContinue)) {
-                try {
-                    if (-not (Test-Path $tt)) { New-Item -ItemType Directory -Path $tt -Force | Out-Null }
-                    $dest = Join-Path $tt $f.Name
-                    if (-not (Test-Path $dest)) { Copy-Item -LiteralPath $f.FullName -Destination $dest; $copied++ }
-                } catch { }
+            # pictures go in content\meshtools\textures (TextureID) and content\textures\meshtools
+            # (testing whether SurfaceAppearances accept that one)
+            foreach ($tt in @((Join-Path $t 'textures'), (Join-Path $d 'textures\meshtools'))) {
+                foreach ($f in @(Get-ChildItem $TexDir -File -ErrorAction SilentlyContinue)) {
+                    try {
+                        if (-not (Test-Path $tt)) { New-Item -ItemType Directory -Path $tt -Force | Out-Null }
+                        $dest = Join-Path $tt $f.Name
+                        if (-not (Test-Path $dest)) { Copy-Item -LiteralPath $f.FullName -Destination $dest; $copied++ }
+                    } catch { }
+                }
             }
         }
         if ($copied -gt 0 -and -not $Quiet) { Log ("Installed {0} mesh file(s) into Studio." -f $copied) }
@@ -769,11 +772,13 @@ function Install-Texture([string]$id, [byte[]]$bytes) {
     [IO.File]::WriteAllBytes((Join-Path $TexDir $name), $bytes)
     if ($TglInstall.IsChecked) {
         foreach ($d in $script:studioDirs) {
-            try {
-                $t = Join-Path $d 'meshtools\textures'
-                if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force | Out-Null }
-                [IO.File]::WriteAllBytes((Join-Path $t $name), $bytes)
-            } catch { }
+            foreach ($sub in @('meshtools\textures', 'textures\meshtools')) {
+                try {
+                    $t = Join-Path $d $sub
+                    if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force | Out-Null }
+                    [IO.File]::WriteAllBytes((Join-Path $t $name), $bytes)
+                } catch { }
+            }
         }
     }
     return $name
