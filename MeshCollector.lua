@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.6" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.7" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -89,6 +89,7 @@ local DEFAULTS = {
 	bigSize = 260,
 	-- local copies: parts that use a SpecialMesh (old heads, hats ...)
 	specialMeshes = "auto", -- auto (MeshPart only when the mesh has bones) | keep | meshpart
+	bakeOverlay = false, -- paint the skin colour into a local picture (fully local, colour fixed)
 	lighting = "follow", -- follow | flat
 	-- model view (Inserter)
 	inspectMode = "xray", -- xray (fade the other parts) | outline (keep them, outline the picked one)
@@ -1459,7 +1460,7 @@ end
 -- solid picture instead, which TextureID loads from your PC - fully local.
 -- texMap = picture id -> file name in the library
 local function bakeLooks(root, texMap)
-	if type(texMap) ~= "table" then
+	if not S.bakeOverlay or type(texMap) ~= "table" then
 		return 0
 	end
 	local list = root:GetDescendants()
@@ -5199,6 +5200,8 @@ local function buildSettingsPage(ctx)
 		{ key = "keep", text = "Keep SpecialMesh" },
 		{ key = "meshpart", text = "Make MeshPart" },
 	}, "specialMeshes"))
+	add(toggle("Paint skin colour into the picture (fully local, colour fixed)", "bakeOverlay", nx()))
+	add(dimText("Off = converted heads keep a SurfaceAppearance (Overlay) using the picture's Roblox ID, so you can change the skin colour any time.", nx(), 10))
 	add(dimText("Auto = meshes with bones (dynamic heads) become MeshParts so FaceControls / bones work; the rest stay SpecialMesh. Keep = only the mesh link changes, so it looks exactly the same. MeshPart = always a real MeshPart; its texture goes in a SurfaceAppearance (Overlay) so the part colour still shows through.", nx(), 10))
 
 	add(sectionTitle("Model view (Inserter)", nx()))
