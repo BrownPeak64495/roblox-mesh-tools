@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.5" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.6" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1452,6 +1452,55 @@ local function applyLocalLook(p, look)
 			p.DoubleSided = look.double and true or false
 		end)
 	end
+end
+
+-- Overlay SurfaceAppearances (made for converted dynamic heads) need a Roblox picture ID.
+-- When the picture is downloaded, Mesh Downloader paints it over the part's colour into a
+-- solid picture instead, which TextureID loads from your PC - fully local.
+-- texMap = picture id -> file name in the library
+local function bakeLooks(root, texMap)
+	if type(texMap) ~= "table" then
+		return 0
+	end
+	local list = root:GetDescendants()
+	table.insert(list, root)
+	local baked = 0
+	for _, sa in ipairs(list) do
+		if sa:IsA("SurfaceAppearance") and sa:GetAttribute("MeshToolsLook") and sa.Parent and sa.Parent:IsA("MeshPart") then
+			local okA, mode = pcall(function()
+				return sa.AlphaMode
+			end)
+			local cm = ""
+			pcall(function()
+				cm = tostring(sa.ColorMap)
+			end)
+			if cm == "" then
+				cm = contentUri(sa, "ColorMapContent")
+			end
+			local tid = idFrom(cm)
+			local file = tid and texMap[tid]
+			if okA and mode == Enum.AlphaMode.Overlay and file then
+				local p = sa.Parent
+				local function hex(c)
+					return string.format("%02x%02x%02x", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+				end
+				local tint = "ffffff"
+				pcall(function()
+					tint = hex(sa.Color)
+				end)
+				local ok, res = request("GET", "/bake?file=" .. HttpService:UrlEncode(file) .. "&color=" .. hex(p.Color) .. "&tint=" .. tint)
+				local d = ok and decodeBody(res)
+				if d and d.ok and d.file then
+					p.TextureID = LOCAL_PREFIX .. "textures/" .. d.file
+					p:SetAttribute("MeshToolsBakedColor", p.Color) -- the colour painted in; rebuild if you change it
+					p:SetAttribute("MeshToolsTextureId", "rbxassetid://" .. tid)
+					sa:Destroy()
+					baked = baked + 1
+				end
+			end
+		end
+	end
+	return baked
 end
 
 local LOCAL_PART_OPTIONS = { RenderFidelity = Enum.RenderFidelity.Precise } -- full detail at any distance
@@ -3266,6 +3315,7 @@ local function buildLocal()
 				-- pictures from the meshtools folder on your PC (tested in Studio)
 			end)
 		end
+		bakeLooks(root, texMap) -- converted dynamic heads: skin colour painted into a local picture
 	end
 	applyPivots(copies)
 	finish(true)
@@ -3526,6 +3576,7 @@ local function getMeshTemplate(m)
 	if part then
 		part.Anchored = true
 		applyLocalTextures(part)
+		bakeLooks(part, lib.textures)
 		meshTemplates[id] = part
 	end
 	return part, err

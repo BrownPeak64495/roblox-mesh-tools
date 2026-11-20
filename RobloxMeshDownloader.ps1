@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '5.5'
+$AppVersion = '5.6'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -15,6 +15,7 @@ Add-Type -AssemblyName WindowsBase
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Net.Http
 Add-Type -AssemblyName System.Security
+Add-Type -AssemblyName System.Drawing
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # No console window, so show startup errors in a popup instead of failing silently.
@@ -757,6 +758,55 @@ function Get-TextureMap {
     $map = @{}
     foreach ($f in @(Get-ChildItem $TexDir -File -ErrorAction SilentlyContinue)) { $map[$f.BaseName] = $f.Name }
     return $map
+}
+
+# Paints a picture over a solid colour (what a SurfaceAppearance set to Overlay shows),
+# optionally tinted, and saves it as a new solid PNG. TextureID can load that from this PC,
+# so dynamic heads keep their skin colour with no Roblox picture ID.
+function Bake-Texture([string]$file, [string]$color, [string]$tint) {
+    $src = Join-Path $TexDir $file
+    if (-not (Test-Path -LiteralPath $src)) { return $null }
+    $name = [IO.Path]::GetFileNameWithoutExtension($file) + "_c$color"
+    if ($tint -and $tint -ne 'ffffff') { $name += "_t$tint" }
+    $name += '.png'
+    $dest = Join-Path $TexDir $name
+    if (-not (Test-Path -LiteralPath $dest)) {
+        $ms = New-Object IO.MemoryStream (,[IO.File]::ReadAllBytes($src))
+        $img = [System.Drawing.Image]::FromStream($ms)
+        try {
+            $bmp = New-Object System.Drawing.Bitmap $img.Width, $img.Height, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            try {
+                $c = [System.Drawing.Color]::FromArgb(255, [Convert]::ToInt32($color.Substring(0, 2), 16), [Convert]::ToInt32($color.Substring(2, 2), 16), [Convert]::ToInt32($color.Substring(4, 2), 16))
+                $g.Clear($c)
+                $attrs = New-Object System.Drawing.Imaging.ImageAttributes
+                if ($tint -and $tint -ne 'ffffff') {
+                    $r = [Convert]::ToInt32($tint.Substring(0, 2), 16) / 255.0
+                    $gg = [Convert]::ToInt32($tint.Substring(2, 2), 16) / 255.0
+                    $b = [Convert]::ToInt32($tint.Substring(4, 2), 16) / 255.0
+                    $cm = New-Object System.Drawing.Imaging.ColorMatrix
+                    $cm.Matrix00 = [single]$r; $cm.Matrix11 = [single]$gg; $cm.Matrix22 = [single]$b
+                    $attrs.SetColorMatrix($cm)
+                }
+                $rect = New-Object System.Drawing.Rectangle 0, 0, $img.Width, $img.Height
+                $g.DrawImage($img, $rect, 0, 0, $img.Width, $img.Height, [System.Drawing.GraphicsUnit]::Pixel, $attrs)
+            } finally { $g.Dispose() }
+            $bmp.Save($dest, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+        } finally { $img.Dispose(); $ms.Dispose() }
+    }
+    [byte[]]$out = [IO.File]::ReadAllBytes($dest)
+    foreach ($d in $script:studioDirs) {
+        foreach ($sub in @('meshtools\textures', 'textures\meshtools')) {
+            try {
+                $t = Join-Path $d $sub
+                if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force | Out-Null }
+                $p = Join-Path $t $name
+                if (-not (Test-Path -LiteralPath $p)) { [IO.File]::WriteAllBytes($p, $out) }
+            } catch { }
+        }
+    }
+    return $name
 }
 
 function Install-Texture([string]$id, [byte[]]$bytes) {
@@ -1716,6 +1766,19 @@ function Handle-Request($ctx) {
             $ev = [object[]]$script:blenderEvents.ToArray()
             $script:blenderEvents.Clear()
             Send-Json $ctx @{ ok = $true; events = $ev }
+            return
+        }
+        if ($path -eq '/bake') {
+            $script:lastPing = Get-Date
+            $file = [string]$ctx.Request.QueryString['file']
+            $color = ([string]$ctx.Request.QueryString['color']).ToLower()
+            $tint = ([string]$ctx.Request.QueryString['tint']).ToLower()
+            if ($file -notmatch '^[A-Za-z0-9_.-]+\.(png|jpg)$' -or $color -notmatch '^[0-9a-f]{6}$' -or ($tint -and $tint -notmatch '^[0-9a-f]{6}$')) {
+                Send-Json $ctx @{ ok = $false; error = 'bad request' } 400; return
+            }
+            if ($script:studioDirs.Count -eq 0) { $script:studioDirs = @(Get-StudioContentDirs) }
+            $baked = Bake-Texture $file $color $tint
+            if ($baked) { Send-Json $ctx @{ ok = $true; file = $baked } } else { Send-Json $ctx @{ ok = $false; error = 'picture not downloaded' } 404 }
             return
         }
         if ($path -eq '/library') {

@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v5.5
+ROBLOX MESH TOOLS v5.6
 ======================
 
 What's in here
@@ -56,9 +56,11 @@ Buttons:
                            MeshPart, so FaceControls and bones work; its
                            texture goes in a SurfaceAppearance set to
                            Overlay so the skin colour still shows through
-                           (that picture loads from Roblox by its ID -
-                           SurfaceAppearances can't use pictures from your
-                           PC; downloading isn't uploading)
+                           - and when that picture is downloaded, Mesh
+                           Downloader paints it over the part's colour into
+                           a new solid picture on your PC and uses that as
+                           TextureID instead (fully local). Change the skin
+                           colour later? Build the local copy again.
                          everything else -> stays SpecialMesh, only the
                            mesh link changes, so it looks exactly the same
                        (or pick Keep SpecialMesh / Make MeshPart always)
