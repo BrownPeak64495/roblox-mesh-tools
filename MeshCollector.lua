@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.0" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.1" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -87,6 +87,8 @@ local DEFAULTS = {
 	expandSpeed = 3, -- tenths of a second for the grow / shrink animation
 	clickGuard = 3, -- tenths of a second: clicks ignored right after the big preview opens
 	bigSize = 260,
+	-- local copies: parts that use a SpecialMesh (old heads, hats ...)
+	specialMeshes = "keep", -- keep (looks exactly the same) | meshpart (turn into a MeshPart)
 	lighting = "follow", -- follow | flat
 	-- model view (Inserter)
 	inspectMode = "xray", -- xray (fade the other parts) | outline (keep them, outline the picked one)
@@ -1507,9 +1509,27 @@ local function convertSpecialMesh(host, sm, id)
 		math.max(native.Z * math.abs(sc.Z), 0.001)
 	)
 	p.CFrame = host.CFrame * CFrame.new(sm.Offset)
-	pcall(function()
-		p.TextureID = sm.TextureId
-	end)
+	-- A SpecialMesh shows the part's colour through see-through spots of its texture (that's
+	-- how classic heads get their skin colour). A MeshPart's TextureID makes those spots
+	-- see-through instead, so the texture goes in a SurfaceAppearance set to Overlay, which
+	-- shows the colour through them, like the SpecialMesh did.
+	if sm.TextureId ~= "" then
+		local sa = Instance.new("SurfaceAppearance")
+		sa.Name = "MeshToolsLook"
+		sa:SetAttribute("MeshToolsLook", true)
+		local ok = pcall(function()
+			sa.ColorMap = sm.TextureId
+			sa.AlphaMode = Enum.AlphaMode.Overlay
+		end)
+		if ok then
+			sa.Parent = p
+		else
+			sa:Destroy()
+			pcall(function()
+				p.TextureID = sm.TextureId
+			end)
+		end
+	end
 	for _, child in ipairs(host:GetChildren()) do
 		if child ~= sm then
 			pcall(function()
@@ -3134,7 +3154,7 @@ local function buildLocal()
 					local id = idFrom(d.MeshId)
 					local host = d.Parent
 					if id and ready[id] then
-						if host and host:IsA("BasePart") and not host:IsA("MeshPart") and not partMap[host] then
+						if S.specialMeshes == "meshpart" and host and host:IsA("BasePart") and not host:IsA("MeshPart") and not partMap[host] then
 							local newPart, err = convertSpecialMesh(host, d, id)
 							if not newPart then
 								failure = err
@@ -3224,6 +3244,13 @@ local function buildLocal()
 					if l then
 						d.TextureId = l
 					end
+				elseif d:IsA("SurfaceAppearance") then
+					for _, prop in ipairs({ "ColorMap", "NormalMap", "MetalnessMap", "RoughnessMap" }) do
+						local l = swapTex(d[prop])
+						if l then
+							d[prop] = l
+						end
+					end
 				end
 			end)
 		end
@@ -3232,7 +3259,7 @@ local function buildLocal()
 	finish(true)
 	Selection:Set(copies)
 
-	local msg = string.format("Built local copy: %d mesh(es) load from your PC as real MeshParts.", replaced)
+	local msg = string.format("Built local copy: %d mesh(es) load from your PC.", replaced)
 	if upgraded > 0 then
 		msg = msg .. string.format(" %d old SpecialMesh part(s) upgraded.", upgraded)
 	end
@@ -3481,7 +3508,10 @@ local function getMeshTemplate(m)
 			part, err = convertMeshPart(look, id)
 		elseif look and look:IsA("BasePart") then
 			local sm = look:FindFirstChildWhichIsA("FileMesh")
-			if sm then
+			if sm and S.specialMeshes == "keep" then
+				sm.MeshId = LOCAL_PREFIX .. id .. ".mesh" -- same Part + SpecialMesh, mesh from your PC
+				part = look
+			elseif sm then
 				part, err = convertSpecialMesh(look, sm, id)
 			end
 		end
@@ -5106,6 +5136,14 @@ local function buildSettingsPage(ctx)
 		{ key = "follow", text = "Follows view" },
 		{ key = "flat", text = "Flat (no shading)" },
 	}, "lighting", rerenderAll))
+
+	add(sectionTitle("Local copies", nx()))
+	add(dimText("Parts that use a SpecialMesh (classic heads, hats, old models)", nx(), 11))
+	add(segmented(nx(), {
+		{ key = "keep", text = "Keep SpecialMesh" },
+		{ key = "meshpart", text = "Make MeshPart" },
+	}, "specialMeshes"))
+	add(dimText("Keep = only the mesh link changes to your PC, so it looks exactly the same (skin colour, face, rig). MeshPart = a real MeshPart; its texture goes in a SurfaceAppearance (Overlay) so the part colour still shows through.", nx(), 10))
 
 	add(sectionTitle("Model view (Inserter)", nx()))
 	add(dimText("When you pick a part in an open model", nx(), 11))

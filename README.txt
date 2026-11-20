@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v5.0
+ROBLOX MESH TOOLS v5.1
 ======================
 
 What's in here
@@ -48,9 +48,14 @@ Buttons:
   Send to Downloader   downloads the meshes AND their textures, and saves
                        each mesh's "look" (texture, SurfaceAppearance,
                        colour) so the Inserter can insert it textured
-  Build local copy     copy of the model with real MeshParts loading your
-                       .mesh files (and downloaded textures), saved to
-                       Local Models
+  Build local copy     copy of the model whose meshes load your .mesh files
+                       (and downloaded textures), saved to Local Models.
+                       Parts with a SpecialMesh (classic heads, hats) keep
+                       it by default - only the mesh link changes - so they
+                       look exactly the same. Settings > Local copies can
+                       turn them into MeshParts instead (texture goes in a
+                       SurfaceAppearance set to Overlay so skin colour
+                       still shows through see-through spots).
   Save model           saves the selected model to Models
   Reset pivots         see PIVOTS below
   Restore pivots       puts the original pivots back
