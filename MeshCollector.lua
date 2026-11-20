@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.3" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.4" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -88,7 +88,7 @@ local DEFAULTS = {
 	clickGuard = 3, -- tenths of a second: clicks ignored right after the big preview opens
 	bigSize = 260,
 	-- local copies: parts that use a SpecialMesh (old heads, hats ...)
-	specialMeshes = "keep", -- keep (looks exactly the same) | meshpart (turn into a MeshPart)
+	specialMeshes = "auto", -- auto (MeshPart only when the mesh has bones) | keep | meshpart
 	lighting = "follow", -- follow | flat
 	-- model view (Inserter)
 	inspectMode = "xray", -- xray (fade the other parts) | outline (keep them, outline the picked one)
@@ -3109,9 +3109,13 @@ local function buildLocal()
 		return
 	end
 	local ready, readyCount = {}, 0
+	local skinned = {} -- meshes with bones (dynamic heads ...): only a MeshPart can move them
 	for _, item in ipairs(data.installed or {}) do
 		ready[tostring(item.id)] = true
 		readyCount = readyCount + 1
+		if (tonumber(item.bones) or 0) ~= 0 then
+			skinned[tostring(item.id)] = true
+		end
 	end
 	if readyCount == 0 then
 		setStatus("None of these meshes are downloaded yet. Press 'Send to Downloader', wait for Done, then try again.", RED)
@@ -3158,7 +3162,8 @@ local function buildLocal()
 					local id = idFrom(d.MeshId)
 					local host = d.Parent
 					if id and ready[id] then
-						if S.specialMeshes == "meshpart" and host and host:IsA("BasePart") and not host:IsA("MeshPart") and not partMap[host] then
+						local toMeshPart = S.specialMeshes == "meshpart" or (S.specialMeshes == "auto" and skinned[id])
+						if toMeshPart and host and host:IsA("BasePart") and not host:IsA("MeshPart") and not partMap[host] then
 							local newPart, err = convertSpecialMesh(host, d, id)
 							if not newPart then
 								failure = err
@@ -3512,7 +3517,7 @@ local function getMeshTemplate(m)
 			part, err = convertMeshPart(look, id)
 		elseif look and look:IsA("BasePart") then
 			local sm = look:FindFirstChildWhichIsA("FileMesh")
-			if sm and S.specialMeshes == "keep" then
+			if sm and (S.specialMeshes == "keep" or (S.specialMeshes == "auto" and (tonumber(m.bones) or 0) == 0)) then
 				sm.MeshId = LOCAL_PREFIX .. id .. ".mesh" -- same Part + SpecialMesh, mesh from your PC
 				part = look
 			elseif sm then
@@ -5144,10 +5149,11 @@ local function buildSettingsPage(ctx)
 	add(sectionTitle("Local copies", nx()))
 	add(dimText("Parts that use a SpecialMesh (classic heads, hats, old models)", nx(), 11))
 	add(segmented(nx(), {
+		{ key = "auto", text = "Auto" },
 		{ key = "keep", text = "Keep SpecialMesh" },
 		{ key = "meshpart", text = "Make MeshPart" },
 	}, "specialMeshes"))
-	add(dimText("Keep = only the mesh link changes to your PC, so it looks exactly the same (skin colour, face, rig). MeshPart = a real MeshPart; its texture goes in a SurfaceAppearance (Overlay) so the part colour still shows through.", nx(), 10))
+	add(dimText("Auto = meshes with bones (dynamic heads) become MeshParts so FaceControls / bones work; the rest stay SpecialMesh. Keep = only the mesh link changes, so it looks exactly the same. MeshPart = always a real MeshPart; its texture goes in a SurfaceAppearance (Overlay) so the part colour still shows through.", nx(), 10))
 
 	add(sectionTitle("Model view (Inserter)", nx()))
 	add(dimText("When you pick a part in an open model", nx(), 11))

@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v5.3
+ROBLOX MESH TOOLS v5.4
 ======================
 
 What's in here
@@ -50,12 +50,15 @@ Buttons:
                        colour) so the Inserter can insert it textured
   Build local copy     copy of the model whose meshes load your .mesh files
                        (and downloaded textures), saved to Local Models.
-                       Parts with a SpecialMesh (classic heads, hats) keep
-                       it by default - only the mesh link changes - so they
-                       look exactly the same. Settings > Local copies can
-                       turn them into MeshParts instead (texture goes in a
-                       SurfaceAppearance set to Overlay so skin colour
-                       still shows through see-through spots).
+                       Parts with a SpecialMesh (classic heads, hats):
+                       Settings > Local copies, default Auto -
+                         mesh with bones (dynamic heads) -> becomes a
+                           MeshPart, so FaceControls and bones work; its
+                           texture goes in a SurfaceAppearance set to
+                           Overlay so the skin colour still shows through
+                         everything else -> stays SpecialMesh, only the
+                           mesh link changes, so it looks exactly the same
+                       (or pick Keep SpecialMesh / Make MeshPart always)
   Save model           saves the selected model to Models
   Reset pivots         see PIVOTS below
   Restore pivots       puts the original pivots back

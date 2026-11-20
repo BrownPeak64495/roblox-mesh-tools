@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '5.3'
+$AppVersion = '5.4'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1455,6 +1455,7 @@ $script:listener = $null
 $script:ctxTask = $null
 $script:lastPing = [DateTime]::MinValue
 $script:boundsCache = @{}
+$script:bonesCache = @{}    # mesh id -> bone count (skinned meshes like dynamic heads)
 $script:runNames = @{}
 $script:uploads = @{}
 
@@ -1680,10 +1681,12 @@ function Handle-Request($ctx) {
                 if ($id -notmatch '^\d{5,}$') { continue }
                 $p = Join-Path $LibDir "$id.mesh"
                 if ((Test-Path $p) -and $TglInstall.IsChecked) {
-                    if (-not $script:boundsCache.ContainsKey($id)) {
-                        $script:boundsCache[$id] = Get-MeshBounds ([IO.File]::ReadAllBytes($p))
+                    if (-not $script:boundsCache.ContainsKey($id) -or -not $script:bonesCache.ContainsKey($id)) {
+                        [byte[]]$mbytes = [IO.File]::ReadAllBytes($p)
+                        $script:boundsCache[$id] = Get-MeshBounds $mbytes
+                        $script:bonesCache[$id] = [int](Get-MeshStats $mbytes).bones
                     }
-                    $installed.Add(@{ id = $id; size = $script:boundsCache[$id] })
+                    $installed.Add(@{ id = $id; size = $script:boundsCache[$id]; bones = $script:bonesCache[$id] })
                 } else {
                     $missing.Add($id)
                 }
