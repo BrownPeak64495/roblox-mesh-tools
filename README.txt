@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v5.7
+ROBLOX MESH TOOLS v5.8
 ======================
 
 What's in here
@@ -58,9 +58,15 @@ Buttons:
                            Overlay so the skin colour still shows through
                            - and when that picture is downloaded, Mesh
                            Downloader paints it over the part's colour into
-                           a new solid picture on your PC and uses that as
-                           TextureID instead (fully local). Change the skin
-                           colour later? Build the local copy again.
+                           a solid picture on your PC and uses that as
+                           TextureID instead (fully local). Change the
+                           head's Color (or Body Colors does) and it's
+                           repainted by itself in a moment, while the plugin
+                           and Mesh Downloader are running.
+                           (Settings > Local copies > "Fully local skin
+                           colour" off = SurfaceAppearance with the Roblox
+                           picture ID instead. SurfaceAppearances can't load
+                           pictures from your PC - tested in two folders.)
                          everything else -> stays SpecialMesh, only the
                            mesh link changes, so it looks exactly the same
                        (or pick Keep SpecialMesh / Make MeshPart always)

@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.7" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.8" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -89,7 +89,7 @@ local DEFAULTS = {
 	bigSize = 260,
 	-- local copies: parts that use a SpecialMesh (old heads, hats ...)
 	specialMeshes = "auto", -- auto (MeshPart only when the mesh has bones) | keep | meshpart
-	bakeOverlay = false, -- paint the skin colour into a local picture (fully local, colour fixed)
+	bakeOverlay = true, -- paint the skin colour into a local picture, repainted when the colour changes
 	lighting = "follow", -- follow | flat
 	-- model view (Inserter)
 	inspectMode = "xray", -- xray (fade the other parts) | outline (keep them, outline the picked one)
@@ -1459,6 +1459,64 @@ end
 -- When the picture is downloaded, Mesh Downloader paints it over the part's colour into a
 -- solid picture instead, which TextureID loads from your PC - fully local.
 -- texMap = picture id -> file name in the library
+local function colorHex(c)
+	return string.format("%02x%02x%02x", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+
+-- Painted heads repaint themselves: when a part's Color changes (by you, Body Colors,
+-- undo ...), Mesh Downloader paints the picture over the new colour and TextureID switches
+-- to it. Parts are found by the attribute MeshToolsTextureFile (the unpainted picture).
+local watchBaked
+do
+	local watched = setmetatable({}, { __mode = "k" })
+	watchBaked = function(p)
+		if watched[p] then
+			return
+		end
+		watched[p] = true
+		local pending = false
+		local function repaint()
+			pending = false
+			if not p.Parent then
+				return
+			end
+			local file = p:GetAttribute("MeshToolsTextureFile")
+			if type(file) ~= "string" then
+				return
+			end
+			local want = colorHex(p.Color)
+			if p:GetAttribute("MeshToolsPaintedColor") == want then
+				return
+			end
+			local tint = p:GetAttribute("MeshToolsTint")
+			local ok, res = request("GET", "/bake?file=" .. HttpService:UrlEncode(file) .. "&color=" .. want .. "&tint=" .. (type(tint) == "string" and tint or "ffffff"))
+			local d = ok and decodeBody(res)
+			if d and d.ok and d.file then
+				p.TextureID = LOCAL_PREFIX .. "textures/" .. d.file
+				p:SetAttribute("MeshToolsPaintedColor", want)
+			end
+		end
+		p:GetPropertyChangedSignal("Color"):Connect(function()
+			if not pending then
+				pending = true
+				task.delay(0.25, repaint) -- dragging the colour picker: wait until it settles
+			end
+		end)
+		task.defer(repaint) -- catch up if the colour changed while Studio / the plugin was closed
+	end
+	local function maybeWatch(d)
+		if d:IsA("MeshPart") and d:GetAttribute("MeshToolsTextureFile") then
+			watchBaked(d)
+		end
+	end
+	task.defer(function()
+		for _, d in ipairs(workspace:GetDescendants()) do
+			maybeWatch(d)
+		end
+		workspace.DescendantAdded:Connect(maybeWatch)
+	end)
+end
+
 local function bakeLooks(root, texMap)
 	if not S.bakeOverlay or type(texMap) ~= "table" then
 		return 0
@@ -1482,20 +1540,21 @@ local function bakeLooks(root, texMap)
 			local file = tid and texMap[tid]
 			if okA and mode == Enum.AlphaMode.Overlay and file then
 				local p = sa.Parent
-				local function hex(c)
-					return string.format("%02x%02x%02x", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
-				end
 				local tint = "ffffff"
 				pcall(function()
-					tint = hex(sa.Color)
+					tint = colorHex(sa.Color)
 				end)
-				local ok, res = request("GET", "/bake?file=" .. HttpService:UrlEncode(file) .. "&color=" .. hex(p.Color) .. "&tint=" .. tint)
+				local want = colorHex(p.Color)
+				local ok, res = request("GET", "/bake?file=" .. HttpService:UrlEncode(file) .. "&color=" .. want .. "&tint=" .. tint)
 				local d = ok and decodeBody(res)
 				if d and d.ok and d.file then
 					p.TextureID = LOCAL_PREFIX .. "textures/" .. d.file
-					p:SetAttribute("MeshToolsBakedColor", p.Color) -- the colour painted in; rebuild if you change it
+					p:SetAttribute("MeshToolsTextureFile", file) -- the unpainted picture, for repainting
+					p:SetAttribute("MeshToolsTint", tint)
+					p:SetAttribute("MeshToolsPaintedColor", want)
 					p:SetAttribute("MeshToolsTextureId", "rbxassetid://" .. tid)
 					sa:Destroy()
+					watchBaked(p)
 					baked = baked + 1
 				end
 			end
@@ -5200,8 +5259,8 @@ local function buildSettingsPage(ctx)
 		{ key = "keep", text = "Keep SpecialMesh" },
 		{ key = "meshpart", text = "Make MeshPart" },
 	}, "specialMeshes"))
-	add(toggle("Paint skin colour into the picture (fully local, colour fixed)", "bakeOverlay", nx()))
-	add(dimText("Off = converted heads keep a SurfaceAppearance (Overlay) using the picture's Roblox ID, so you can change the skin colour any time.", nx(), 10))
+	add(toggle("Fully local skin colour (repaints when you change it)", "bakeOverlay", nx()))
+	add(dimText("On = the face picture is painted over the head's colour on your PC and repainted by itself whenever the Color changes (while this plugin and Mesh Downloader are running). Off = a SurfaceAppearance (Overlay) using the picture's Roblox ID.", nx(), 10))
 	add(dimText("Auto = meshes with bones (dynamic heads) become MeshParts so FaceControls / bones work; the rest stay SpecialMesh. Keep = only the mesh link changes, so it looks exactly the same. MeshPart = always a real MeshPart; its texture goes in a SurfaceAppearance (Overlay) so the part colour still shows through.", nx(), 10))
 
 	add(sectionTitle("Model view (Inserter)", nx()))
