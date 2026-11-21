@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.3" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.4" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -66,6 +66,7 @@ local DEFAULTS = {
 	blenderKeepMoves = true, -- keep where you moved / how you resized a part in Studio when Blender resends it
 	blenderBones = true, -- build Bones and follow poses for meshes sent with an armature
 	blenderSync = true, -- parts sent with "Send to Blender" keep Blender up to date as you change them
+	blenderShareBones = true, -- meshes on one Blender armature share one set of Bones (one skeleton)
 	-- appearance
 	uiScale = 100, -- percent
 	theme = "studio", -- studio | dark | classic | midnight
@@ -5456,6 +5457,8 @@ local function buildSettingsPage(ctx)
 	add(toggle("Select a part when it arrives", "blenderSelect", nx()))
 	add(toggle("Keep my Studio moves when Blender resends", "blenderKeepMoves", nx()))
 	add(toggle("Build Bones + follow poses (rigged meshes)", "blenderBones", nx()))
+	add(toggle("Meshes on one armature share one skeleton", "blenderShareBones", nx()))
+	add(dimText("Separate parts (each with its own texture) bend with the same Bones, so the joints between them stay closed. The Bones go in one part and the parts are grouped in a model named after the armature. Off = every part gets its own copy.", nx(), 10))
 	add(dimText("Off = every resend snaps the part back to where it is in Blender.", nx(), 10))
 	add(toggle("Keep parts I send to Blender in sync", "blenderSync", nx()))
 	add(dimText("Select parts and click Send to Blender (toolbar). Moving, resizing or recolouring them here updates Blender, and editing them in Blender updates them here.", nx(), 10))
@@ -5604,13 +5607,73 @@ end)
 		return c
 	end
 
+	-- One skeleton for all meshes on the same Blender armature: the Bones live in one part
+	-- (the "host"), the other parts are skinned to them.
+	local function rigHost(rig, except)
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("BasePart") and d ~= except and d:GetAttribute("BlenderRig") == rig and d:GetAttribute("BlenderRigHost") then
+				return d
+			end
+		end
+		return nil
+	end
+	local function rigBones(p, ev)
+		local rig = ev.rig
+		if not (S.blenderShareBones and type(rig) == "string" and type(ev.bones) == "table") then
+			p:SetAttribute("BlenderRig", nil)
+			p:SetAttribute("BlenderRigHost", nil)
+			buildBones(p, ev.bones)
+			return
+		end
+		p:SetAttribute("BlenderRig", rig)
+		local host = p:GetAttribute("BlenderRigHost") and p or rigHost(rig, p)
+		if host and host ~= p then
+			p:SetAttribute("BlenderRigHost", nil)
+			buildBones(p, nil) -- uses the host's Bones
+			return
+		end
+		-- this part holds the skeleton. Bone positions come relative to this part's centre;
+		-- every part sends the whole armature, so any of them can be the host.
+		p:SetAttribute("BlenderRigHost", true)
+		buildBones(p, ev.bones)
+	end
+	-- the folder a new part of a rig goes in: a model named after the armature
+	local function rigParent(ev)
+		if not (S.blenderShareBones and type(ev.rig) == "string") then
+			return workspace
+		end
+		local other = rigHost(ev.rig)
+		if not other then
+			for _, d in ipairs(workspace:GetDescendants()) do
+				if d:IsA("BasePart") and d:GetAttribute("BlenderRig") == ev.rig then
+					other = d
+					break
+				end
+			end
+		end
+		if not other then
+			local m = Instance.new("Model")
+			m.Name = (ev.rigName and ev.rigName ~= "") and tostring(ev.rigName) or "Blender rig"
+			m.Parent = workspace
+			return m
+		end
+		if other.Parent == workspace then
+			local m = Instance.new("Model")
+			m.Name = (ev.rigName and ev.rigName ~= "") and tostring(ev.rigName) or "Blender rig"
+			m.Parent = workspace
+			other.Parent = m
+		end
+		return other.Parent
+	end
+
 	-- Live posing: Bone.Transform isn't saved with the place, so this never needs undo
 	local function applyPose(ev)
 		if type(ev.t) ~= "table" then
 			return
 		end
 		for _, p in ipairs(blenderParts(ev.key)) do
-			local bones = bonesOf(p)
+			local rig = p:GetAttribute("BlenderRig")
+			local bones = bonesOf((rig and S.blenderShareBones and rigHost(rig)) or p)
 			for name, t in pairs(ev.t) do
 				local bone = bones[name]
 				if bone and type(t) == "table" and #t == 12 then
@@ -5661,7 +5724,7 @@ end)
 			p.CFrame = cf
 			applyLocalLook(p, ev)
 			stamp(p, ev, center, size)
-			buildBones(p, ev.bones)
+			rigBones(p, ev)
 			return p
 		end
 
@@ -5690,8 +5753,8 @@ end)
 		end
 		applyLocalLook(fresh, ev)
 		stamp(fresh, ev, center, size)
-		buildBones(fresh, ev.bones)
 		fresh.Parent = p.Parent
+		rigBones(fresh, ev)
 		local sel = Selection:Get()
 		local wasSelected = false
 		for i, v in ipairs(sel) do
@@ -6000,8 +6063,8 @@ end)
 				p.CFrame = CFrame.new(center)
 				applyLocalLook(p, ev)
 				stamp(p, ev, center, size)
-				buildBones(p, ev.bones)
-				p.Parent = workspace
+				p.Parent = rigParent(ev)
+				rigBones(p, ev)
 				fromBlender(p)
 				done = 1
 				if S.blenderSelect then

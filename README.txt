@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v6.3
+ROBLOX MESH TOOLS v6.4
 ======================
 
 What's in here
@@ -212,6 +212,13 @@ of the object's first material:
   Procedural (node) textures have no picture to send - bake them first.
 Each send gets a new number so Studio never shows an old cached copy; the
 library keeps only the newest one, and Studio's folder keeps the last 3.
+
+Several meshes on ONE armature (a character split into parts, each with its
+own texture): select them all and Send. They go into one model named after
+the armature, with ONE set of Bones (in one of the parts) that every part is
+skinned to - so they bend together and the joints between them stay closed.
+Tip: give the vertices along each seam the same weights in both meshes.
+(Settings > Blender > "Meshes on one armature share one skeleton".)
 
 --------------------------------------------------
 STUDIO -> BLENDER (and keeping both in sync)

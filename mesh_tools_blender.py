@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 5, 0),
+    "version": (1, 6, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -634,6 +634,13 @@ def send_object(obj, props, depsgraph):
         meta["color"] = look["color"]
     if info.get("bones"):
         meta["bones"] = info["bones"]
+        arm = bpy.data.objects.get(info.get("arm") or "")
+        if arm is not None:
+            # meshes on the same armature share one set of bones in Studio
+            if not arm.get("roblox_rig_key"):
+                arm["roblox_rig_key"] = hashlib.sha1(("%s|%f" % (arm.name, time.time())).encode()).hexdigest()[:16]
+            meta["rig"] = arm["roblox_rig_key"]
+            meta["rigName"] = arm.name
     res = _post(props, "/blender/mesh", meta, data)
     if res.get("needTextures"):
         for h in res["needTextures"]:

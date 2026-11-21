@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.3'
+$AppVersion = '6.4'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1641,6 +1641,7 @@ function Receive-BlenderMesh($ctx) {
         size = @([double]$m.size[0], [double]$m.size[1], [double]$m.size[2])
     }
     if ($m.bones) { $ev.bones = @($m.bones) }
+    if ([string]$m.rig -match '^[0-9a-f]{6,40}$') { $ev.rig = [string]$m.rig; $ev.rigName = (Clean-Field ([string]$m.rigName)) }
     $ev.maps = $maps
     $ev.alpha = [bool]$m.alpha
     $ev.double = [bool]$m.double
