@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v5.9
+ROBLOX MESH TOOLS v6.0
 ======================
 
 What's in here
@@ -62,7 +62,12 @@ Buttons:
                            TextureID instead (fully local). Change the
                            head's Color (or Body Colors does) and it's
                            repainted by itself in a moment, while the plugin
-                           and Mesh Downloader are running.
+                           and Mesh Downloader are running. Ctrl+Z / Ctrl+Y
+                           undo/redo colour and picture together. Pictures
+                           for colours you moved away from are deleted the
+                           next time a place opens (kept until then so undo
+                           works); anything still using one gets it painted
+                           again automatically.
                            (Settings > Local copies > "Fully local skin
                            colour" off = SurfaceAppearance with the Roblox
                            picture ID instead. SurfaceAppearances can't load

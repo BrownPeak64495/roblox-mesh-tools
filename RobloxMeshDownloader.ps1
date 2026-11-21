@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '5.9'
+$AppVersion = '6.0'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -770,7 +770,9 @@ function Bake-Texture([string]$file, [string]$color, [string]$tint) {
     if ($tint -and $tint -ne 'ffffff') { $name += "_t$tint" }
     $name += '.png'
     $dest = Join-Path $TexDir $name
+    $script:bakeCreated = $false
     if (-not (Test-Path -LiteralPath $dest)) {
+        $script:bakeCreated = $true
         $ms = New-Object IO.MemoryStream (,[IO.File]::ReadAllBytes($src))
         $img = [System.Drawing.Image]::FromStream($ms)
         try {
@@ -802,7 +804,7 @@ function Bake-Texture([string]$file, [string]$color, [string]$tint) {
                 $t = Join-Path $d $sub
                 if (-not (Test-Path $t)) { New-Item -ItemType Directory -Path $t -Force | Out-Null }
                 $p = Join-Path $t $name
-                if (-not (Test-Path -LiteralPath $p)) { [IO.File]::WriteAllBytes($p, $out) }
+                if (-not (Test-Path -LiteralPath $p)) { [IO.File]::WriteAllBytes($p, $out); $script:bakeCreated = $true }
             } catch { }
         }
     }
@@ -1778,7 +1780,24 @@ function Handle-Request($ctx) {
             }
             if ($script:studioDirs.Count -eq 0) { $script:studioDirs = @(Get-StudioContentDirs) }
             $baked = Bake-Texture $file $color $tint
-            if ($baked) { Send-Json $ctx @{ ok = $true; file = $baked } } else { Send-Json $ctx @{ ok = $false; error = 'picture not downloaded' } 404 }
+            if ($baked) { Send-Json $ctx @{ ok = $true; file = $baked; created = [bool]$script:bakeCreated } } else { Send-Json $ctx @{ ok = $false; error = 'picture not downloaded' } 404 }
+            return
+        }
+        if ($path -eq '/unbake' -and $ctx.Request.HttpMethod -eq 'POST') {
+            # painted skin-colour pictures nothing uses any more (only names like x_c1a2b3c.png)
+            $sr = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8)
+            $d = $sr.ReadToEnd() | ConvertFrom-Json; $sr.Close()
+            if ($script:studioDirs.Count -eq 0) { $script:studioDirs = @(Get-StudioContentDirs) }
+            $n = 0
+            foreach ($f in @($d.files)) {
+                $f = [string]$f
+                if ($f -notmatch '^[A-Za-z0-9_.-]+_c[0-9a-f]{6}(_t[0-9a-f]{6})?\.png$') { continue }
+                $places = @(Join-Path $TexDir $f)
+                foreach ($sd in $script:studioDirs) { $places += (Join-Path $sd "meshtools\textures\$f"); $places += (Join-Path $sd "textures\meshtools\$f") }
+                foreach ($pp in $places) { try { if (Test-Path -LiteralPath $pp) { Remove-Item -LiteralPath $pp -Force; $n++ } } catch { } }
+            }
+            if ($n -gt 0) { Log ("Cleaned up {0} old skin-colour picture file(s)." -f $n) }
+            Send-Json $ctx @{ ok = $true; deleted = $n }
             return
         }
         if ($path -eq '/library') {

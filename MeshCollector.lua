@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.9" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.0" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1469,13 +1469,42 @@ end
 local watchBaked
 do
 	local watched = setmetatable({}, { __mode = "k" })
+	local TRASH_KEY = "v4_paintTrash" -- painted pictures you've moved away from (deleted on next place open)
+
+	local function paintedName(file, hex, tint)
+		local base = string.gsub(file, "%.%w+$", "")
+		return base .. "_c" .. hex .. ((tint ~= "ffffff") and ("_t" .. tint) or "") .. ".png"
+	end
+	local function paintedFileOf(textureId)
+		local f = string.match(tostring(textureId or ""), "meshtools/textures/([%w_%.%-]+)$")
+		if f and string.match(f, "_c%x%x%x%x%x%x") then
+			return f
+		end
+		return nil
+	end
+	local function addTrash(f)
+		local list = readSetting(TRASH_KEY)
+		if type(list) ~= "table" then
+			list = {}
+		end
+		if not table.find(list, f) then
+			table.insert(list, f)
+			if #list > 2000 then
+				table.remove(list, 1)
+			end
+			pcall(function()
+				plugin:SetSetting(TRASH_KEY, list)
+			end)
+		end
+	end
+
 	watchBaked = function(p)
 		if watched[p] then
 			return
 		end
 		watched[p] = true
 		local pending = false
-		local function repaint()
+		local function repaint(firstLook)
 			pending = false
 			if not p.Parent then
 				return
@@ -1485,15 +1514,48 @@ do
 				return
 			end
 			local want = colorHex(p.Color)
-			if p:GetAttribute("MeshToolsPaintedColor") == want then
+			local tint = p:GetAttribute("MeshToolsTint")
+			tint = type(tint) == "string" and tint or "ffffff"
+			local target = LOCAL_PREFIX .. "textures/" .. paintedName(file, want, tint)
+			local already = p.TextureID == target -- e.g. Ctrl+Z / Ctrl+Y put both back together
+			if already and not firstLook then
 				return
 			end
-			local tint = p:GetAttribute("MeshToolsTint")
-			local ok, res = request("GET", "/bake?file=" .. HttpService:UrlEncode(file) .. "&color=" .. want .. "&tint=" .. (type(tint) == "string" and tint or "ffffff"))
+			-- /bake makes the picture if it's missing (it may have been cleaned up)
+			local ok, res = request("GET", "/bake?file=" .. HttpService:UrlEncode(file) .. "&color=" .. want .. "&tint=" .. tint)
 			local d = ok and decodeBody(res)
-			if d and d.ok and d.file then
-				p.TextureID = LOCAL_PREFIX .. "textures/" .. d.file
-				p:SetAttribute("MeshToolsPaintedColor", want)
+			if not (d and d.ok and d.file) then
+				return
+			end
+			local path = LOCAL_PREFIX .. "textures/" .. d.file
+			if already then
+				if d.created then
+					-- the picture had been cleaned up and was just made again: make Studio reload it
+					p.TextureID = ""
+					p.TextureID = path
+				end
+				return
+			end
+			local old = paintedFileOf(p.TextureID)
+			-- join the colour change's undo step, so Ctrl+Z / Ctrl+Y change colour and picture together
+			local rec = nil
+			pcall(function()
+				rec = ChangeHistoryService:TryBeginRecording("Repaint skin colour")
+			end)
+			p.TextureID = path
+			p:SetAttribute("MeshToolsPaintedColor", want)
+			if rec then
+				local appended = pcall(function()
+					ChangeHistoryService:FinishRecording(rec, Enum.FinishRecordingOperation.Append)
+				end)
+				if not appended then
+					pcall(function()
+						ChangeHistoryService:FinishRecording(rec, Enum.FinishRecordingOperation.Commit)
+					end)
+				end
+			end
+			if old and old ~= d.file then
+				addTrash(old) -- kept until the place closes, so Ctrl+Z still finds it
 			end
 		end
 		p:GetPropertyChangedSignal("Color"):Connect(function()
@@ -1502,7 +1564,7 @@ do
 				task.delay(0.25, repaint) -- dragging the colour picker: wait until it settles
 			end
 		end)
-		task.defer(repaint) -- catch up if the colour changed while Studio / the plugin was closed
+		task.defer(repaint, true) -- catch up if the colour changed while Studio / the plugin was closed
 	end
 	local function maybeWatch(d)
 		if d:IsA("MeshPart") and d:GetAttribute("MeshToolsTextureFile") then
@@ -1510,6 +1572,38 @@ do
 		end
 	end
 	task.defer(function()
+		-- a place just opened (no undo history yet): delete painted pictures you moved away
+		-- from earlier, unless something here still uses them
+		local inUse = {}
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("MeshPart") then
+				local f = paintedFileOf(d.TextureID)
+				if f then
+					inUse[f] = true
+				end
+			end
+		end
+		local list = readSetting(TRASH_KEY)
+		if type(list) == "table" and #list > 0 then
+			local gone, keep = {}, {}
+			for _, f in ipairs(list) do
+				if inUse[f] then
+					table.insert(keep, f)
+				else
+					table.insert(gone, f)
+				end
+			end
+			if #gone > 0 then
+				local ok, res = request("POST", "/unbake", HttpService:JSONEncode({ files = gone }))
+				local d = ok and decodeBody(res)
+				if not (d and d.ok) then
+					keep = list -- app closed: try again next time
+				end
+			end
+			pcall(function()
+				plugin:SetSetting(TRASH_KEY, keep)
+			end)
+		end
 		for _, d in ipairs(workspace:GetDescendants()) do
 			maybeWatch(d)
 		end
