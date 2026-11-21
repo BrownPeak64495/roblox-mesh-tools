@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.1" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.2" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -64,6 +64,7 @@ local DEFAULTS = {
 	blenderInsert = true, -- put new Blender objects into the scene (off = only update parts already there)
 	blenderSelect = true, -- select a part when it first arrives
 	blenderKeepMoves = true, -- keep where you moved / how you resized a part in Studio when Blender resends it
+	blenderBones = true, -- build Bones and follow poses for meshes sent with an armature
 	-- appearance
 	uiScale = 100, -- percent
 	theme = "studio", -- studio | dark | classic | midnight
@@ -5425,6 +5426,7 @@ local function buildSettingsPage(ctx)
 	add(toggle("Add new Blender objects to the scene", "blenderInsert", nx()))
 	add(toggle("Select a part when it arrives", "blenderSelect", nx()))
 	add(toggle("Keep my Studio moves when Blender resends", "blenderKeepMoves", nx()))
+	add(toggle("Build Bones + follow poses (rigged meshes)", "blenderBones", nx()))
 	add(dimText("Off = every resend snaps the part back to where it is in Blender.", nx(), 10))
 
 	add(sectionTitle("Collector", nx()))
@@ -5671,8 +5673,13 @@ do
 			return
 		end
 		if ev.type == "pose" then
-			applyPose(ev)
+			if S.blenderBones then
+				applyPose(ev)
+			end
 			return
+		end
+		if not S.blenderBones then
+			ev.bones = nil -- the mesh still comes in, just without Bone objects
 		end
 		if not tostring(ev.id or ""):match("^%d+$") then
 			return

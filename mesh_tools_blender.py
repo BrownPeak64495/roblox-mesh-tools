@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 3, 0),
+    "version": (1, 4, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -355,6 +355,7 @@ def _write_v7(verts, faces, bones):
         groups.append((cur, cur_set))
 
     out_v, out_f, out_s, subsets = [], [], [], []
+    sub_global = []        # per output vertex: its section's bone list
     vbase = fbase = 0
     for flist, bset in groups:
         blist = sorted(bset)
@@ -370,6 +371,7 @@ def _write_v7(verts, faces, bones):
                     si[r, k] = local[int(skin_idx[v, k])]
                     si[r, 4 + k] = skin_w[v, k]
         out_s.append(si)
+        sub_global.extend([blist] * len(used))
         subsets.append((fbase, len(gf), vbase, len(used), blist))
         vbase += len(used)
         fbase += len(gf)
@@ -387,13 +389,26 @@ def _write_v7(verts, faces, bones):
     core = struct.pack("<I", nv) + va.tobytes() + struct.pack("<I", nf) + F.tobytes()
     lods = struct.pack("<HBI", 0, 1, 2) + struct.pack("<II", 0, nf)
 
+    # "culling" size per bone: Roblox's own files give every bone that moves vertices a
+    # non-zero size (and 0 to bones that move nothing). Use a generous one: far enough from
+    # the bone to cover every vertex it moves, plus the whole mesh's size.
+    bone_verts = {}
+    for v in range(nv):
+        for k in range(4):
+            if S[v, 4 + k] > 0:
+                bone_verts.setdefault(int(sub_global[v][S[v, k]]), []).append(v)
+    diag = float(np.linalg.norm(V[:, 0:3].max(axis=0) - V[:, 0:3].min(axis=0)))
     names = b""
     bone_bytes = b""
-    for b in bones:
+    for bi, b in enumerate(bones):
         off = len(names)
         names += b["n"].encode("utf-8") + b"\0"
         par = b["p"] if b["p"] >= 0 else 0xFFFF
-        bone_bytes += struct.pack("<IHHf9f3f", off, par, par, 0.0,
+        cull = 0.0
+        if bi in bone_verts:
+            here = np.array([b["x"], b["y"], b["z"]])
+            cull = float(np.linalg.norm(V[bone_verts[bi], 0:3] - here, axis=1).max()) + diag
+        bone_bytes += struct.pack("<IHHf9f3f", off, par, par, cull,
                                   1, 0, 0, 0, 1, 0, 0, 0, 1, b["x"], b["y"], b["z"])
     sub_bytes = b""
     for fb, fl, vb, vl, blist in subsets:

@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.1'
+$AppVersion = '6.2'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
