@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v6.0
+ROBLOX MESH TOOLS v6.1
 ======================
 
 What's in here
@@ -63,11 +63,11 @@ Buttons:
                            head's Color (or Body Colors does) and it's
                            repainted by itself in a moment, while the plugin
                            and Mesh Downloader are running. Ctrl+Z / Ctrl+Y
-                           undo/redo colour and picture together. Pictures
-                           for colours you moved away from are deleted the
-                           next time a place opens (kept until then so undo
-                           works); anything still using one gets it painted
-                           again automatically.
+                           undo/redo colour and picture together. The old
+                           colour's picture is deleted as soon as you change
+                           colour (Studio keeps showing it from memory, so
+                           undo still works, and the file is made again on
+                           undo / when a place that uses it opens).
                            (Settings > Local copies > "Fully local skin
                            colour" off = SurfaceAppearance with the Roblox
                            picture ID instead. SurfaceAppearances can't load

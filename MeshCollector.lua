@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.0" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.1" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1518,10 +1518,8 @@ do
 			tint = type(tint) == "string" and tint or "ffffff"
 			local target = LOCAL_PREFIX .. "textures/" .. paintedName(file, want, tint)
 			local already = p.TextureID == target -- e.g. Ctrl+Z / Ctrl+Y put both back together
-			if already and not firstLook then
-				return
-			end
-			-- /bake makes the picture if it's missing (it may have been cleaned up)
+			-- /bake makes the picture if it's missing (old colours are deleted right away; Studio
+			-- still shows them from memory, so undo works - this just puts the file back on disk)
 			local ok, res = request("GET", "/bake?file=" .. HttpService:UrlEncode(file) .. "&color=" .. want .. "&tint=" .. tint)
 			local d = ok and decodeBody(res)
 			if not (d and d.ok and d.file) then
@@ -1529,8 +1527,8 @@ do
 			end
 			local path = LOCAL_PREFIX .. "textures/" .. d.file
 			if already then
-				if d.created then
-					-- the picture had been cleaned up and was just made again: make Studio reload it
+				if firstLook and d.created then
+					-- place just opened and its picture was missing: make Studio load the new file
 					p.TextureID = ""
 					p.TextureID = path
 				end
@@ -1555,7 +1553,23 @@ do
 				end
 			end
 			if old and old ~= d.file then
-				addTrash(old) -- kept until the place closes, so Ctrl+Z still finds it
+				-- delete the old colour's picture now, unless another painted part uses it
+				local shared = false
+				for other in pairs(watched) do
+					if other ~= p and other.Parent and paintedFileOf(other.TextureID) == old then
+						shared = true
+						break
+					end
+				end
+				if not shared then
+					task.spawn(function()
+						local okD, resD = request("POST", "/unbake", HttpService:JSONEncode({ files = { old } }))
+						local dd = okD and decodeBody(resD)
+						if not (dd and dd.ok) then
+							addTrash(old) -- app busy / closed: delete it next time a place opens
+						end
+					end)
+				end
 			end
 		end
 		p:GetPropertyChangedSignal("Color"):Connect(function()
