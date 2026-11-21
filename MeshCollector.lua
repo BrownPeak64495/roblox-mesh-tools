@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "5.8" -- keep in sync with version.json
+local PLUGIN_VERSION = "5.9" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -2706,7 +2706,7 @@ local frozenSelection = {}
 local suppressLiveUntil = 0
 
 -- ===== COLLECTOR BLOCK =====
-do
+;(function() -- COLLECTOR BLOCK (own function: keeps the main body under Luau's local limit)
 -- =================================================================
 -- MESH COLLECTOR
 -- =================================================================
@@ -3415,10 +3415,10 @@ Selection.SelectionChanged:Connect(function()
 		queueRefresh()
 	end
 end)
-end -- COLLECTOR BLOCK
+end)() -- COLLECTOR BLOCK
 
 -- ===== INSERTER BLOCK =====
-do
+;(function() -- INSERTER BLOCK (own function, same reason)
 -- =================================================================
 -- MESH INSERTER
 -- =================================================================
@@ -5127,7 +5127,7 @@ do
 		busy = false
 	end)
 end
-end -- INSERTER BLOCK
+end)() -- INSERTER BLOCK
 
 -- =================================================================
 -- SETTINGS TAB (same settings in both windows)
