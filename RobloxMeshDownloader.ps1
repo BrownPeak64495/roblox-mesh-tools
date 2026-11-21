@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '7.2'
+$AppVersion = '7.3'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -2179,8 +2179,13 @@ $timer.Add_Tick({
     # Every ~60 seconds, re-copy meshes in case Studio updated (updates wipe its content folder).
     $script:tickCount++
     if ($script:tickCount -eq 4) { Check-Updates }
-    # and every ~3 minutes while it's open - but never in the middle of downloads or a Blender session
-    if ($script:tickCount % 1200 -eq 0 -and -not $script:busy -and ((Get-Date) - $script:lastActive).TotalSeconds -gt 30) { Check-Updates -Quiet }
+    # and every ~2 minutes while it's open - not mid-download, and not in the same moment
+    # something is being sent between Studio and Blender (it waits a few seconds for a pause)
+    if ($script:tickCount % 800 -eq 0) { $script:updateDue = $true }
+    if ($script:updateDue -and -not $script:busy -and ((Get-Date) - $script:lastActive).TotalSeconds -gt 8) {
+        $script:updateDue = $false
+        Check-Updates -Quiet
+    }
     if ($script:tickCount % 400 -eq 0 -and -not $script:busy) { Sync-Studio -Quiet }
     if ($script:tickCount % 10 -eq 0 -and -not $script:busy) { Watch-Inbox }
     if ($script:toBlenderWait.Count -gt 0 -and -not $script:busy) { Check-ToBlenderWait }
