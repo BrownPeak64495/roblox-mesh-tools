@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v6.2
+ROBLOX MESH TOOLS v6.3
 ======================
 
 What's in here
@@ -7,7 +7,7 @@ What's in here
   MeshDownloader.ico          The app's icon
   RobloxMeshDownloader.ps1    The Mesh Downloader app
   MeshCollector.lua           The Studio plugin (the app installs it for you)
-  mesh_tools_blender.py       Blender add-on: Send to Studio (install it in Blender)
+  mesh_tools_blender.py       Blender add-on: Send to Studio / receive from Studio
   version.json                Used by the auto-updater
 
 --------------------------------------------------
@@ -212,6 +212,31 @@ of the object's first material:
   Procedural (node) textures have no picture to send - bake them first.
 Each send gets a new number so Studio never shows an old cached copy; the
 library keeps only the newest one, and Studio's folder keeps the last 3.
+
+--------------------------------------------------
+STUDIO -> BLENDER (and keeping both in sync)
+--------------------------------------------------
+  1. Blender: the Roblox panel (N key > Roblox) > "Receive from Studio" on
+     (on by default). Mesh Downloader must be open.
+  2. Studio: select parts (MeshParts, or parts with a SpecialMesh - a whole
+     model works too) > toolbar "Send to Blender".
+  3. They appear in Blender in the same place and size, with their picture,
+     colour and see-through spots set up like Roblox draws them:
+       - SpecialMesh / painted dynamic head / SurfaceAppearance Overlay:
+         the part colour shows through the see-through spots (a Mix node -
+         change its colour and Studio repaints the part)
+       - SurfaceAppearance Transparency: see-through stays see-through
+       - rigged meshes come with an armature + vertex groups
+  4. They stay linked both ways (Live turns on in Blender by itself):
+       - move / turn / resize / recolour the part in Studio -> Blender follows
+       - edit it in Blender -> the part in Studio updates
+     A Ctrl+D copy in Studio isn't linked. Turn the Studio side off in
+     Settings > Blender > "Keep parts I send to Blender in sync".
+  Meshes that aren't downloaded yet are downloaded first (needs your API
+  key). Blender can also open .mesh files directly: File > Import >
+  Roblox Mesh (.mesh) - any version, Draco-compressed ones too.
+  Once you've changed a part in Blender, Studio's undo won't rebuild it in
+  Blender from the older mesh - send it again from Blender instead.
 
 --------------------------------------------------
 IMPORT .OBJ (in the Studio plugin)

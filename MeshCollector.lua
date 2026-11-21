@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.2" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.3" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -65,6 +65,7 @@ local DEFAULTS = {
 	blenderSelect = true, -- select a part when it first arrives
 	blenderKeepMoves = true, -- keep where you moved / how you resized a part in Studio when Blender resends it
 	blenderBones = true, -- build Bones and follow poses for meshes sent with an armature
+	blenderSync = true, -- parts sent with "Send to Blender" keep Blender up to date as you change them
 	-- appearance
 	uiScale = 100, -- percent
 	theme = "studio", -- studio | dark | classic | midnight
@@ -1401,6 +1402,7 @@ end
 -- and both sides (Blender shows the back of faces unless Backface Culling is on).
 -- look = { maps = { color, normal, roughness, metalness = file names }, alpha, tint = {r,g,b}, double }
 local LOCAL_SA_PATH = nil -- set once a local folder SurfaceAppearances accept is found
+local watchBaked -- (below) repaints picture-over-colour parts when their colour changes
 
 local function applyLocalLook(p, look)
 	local maps = type(look.maps) == "table" and look.maps or {}
@@ -1411,6 +1413,30 @@ local function applyLocalLook(p, look)
 		return f and (LOCAL_SA_PATH .. tostring(f)) or nil
 	end
 	local color = maps.color
+	if look.look == "overlay" and color and S.bakeOverlay and watchBaked then
+		if type(look.color) == "table" then
+			p.Color = Color3.new(tonumber(look.color[1]) or 1, tonumber(look.color[2]) or 1, tonumber(look.color[3]) or 1)
+		end
+		local same = p:GetAttribute("MeshToolsTextureFile") == tostring(color)
+		p:SetAttribute("MeshToolsTextureFile", tostring(color))
+		p:SetAttribute("MeshToolsTint", "ffffff")
+		if not same or not string.find(textureOf(p), "_c%x%x%x%x%x%x") then
+			pcall(function()
+				p.TextureID = path(color) -- until the painted picture is ready
+			end)
+		end
+		watchBaked(p, true)
+		if look.double ~= nil then
+			pcall(function()
+				p.DoubleSided = look.double and true or false
+			end)
+		end
+		return
+	elseif p:GetAttribute("MeshToolsTextureFile") and look.maps then
+		for _, a in ipairs({ "MeshToolsTextureFile", "MeshToolsTint", "MeshToolsPaintedColor", "MeshToolsTextureId" }) do
+			p:SetAttribute(a, nil)
+		end
+	end
 	-- SurfaceAppearances can't load pictures from your PC (tested in Studio), so local
 	-- pictures go on TextureID. Normal / roughness / metal pictures need a SurfaceAppearance,
 	-- so they only work once there's a local path Studio accepts for them.
@@ -1467,7 +1493,6 @@ end
 -- Painted heads repaint themselves: when a part's Color changes (by you, Body Colors,
 -- undo ...), Mesh Downloader paints the picture over the new colour and TextureID switches
 -- to it. Parts are found by the attribute MeshToolsTextureFile (the unpainted picture).
-local watchBaked
 do
 	local watched = setmetatable({}, { __mode = "k" })
 	local TRASH_KEY = "v4_paintTrash" -- painted pictures you've moved away from (deleted on next place open)
@@ -1499,8 +1524,11 @@ do
 		end
 	end
 
-	watchBaked = function(p)
+	watchBaked = function(p, again)
 		if watched[p] then
+			if again and type(watched[p]) == "function" then
+				task.defer(watched[p]) -- new picture: paint it now
+			end
 			return
 		end
 		watched[p] = true
@@ -1573,6 +1601,7 @@ do
 				end
 			end
 		end
+		watched[p] = repaint
 		p:GetPropertyChangedSignal("Color"):Connect(function()
 			if not pending then
 				pending = true
@@ -5428,6 +5457,8 @@ local function buildSettingsPage(ctx)
 	add(toggle("Keep my Studio moves when Blender resends", "blenderKeepMoves", nx()))
 	add(toggle("Build Bones + follow poses (rigged meshes)", "blenderBones", nx()))
 	add(dimText("Off = every resend snaps the part back to where it is in Blender.", nx(), 10))
+	add(toggle("Keep parts I send to Blender in sync", "blenderSync", nx()))
+	add(dimText("Select parts and click Send to Blender (toolbar). Moving, resizing or recolouring them here updates Blender, and editing them in Blender updates them here.", nx(), 10))
 
 	add(sectionTitle("Collector", nx()))
 	add(toggle("Live (follow what I click)", "live", nx(), rerenderAll))
@@ -5505,13 +5536,14 @@ Studio.ThemeChanged:Connect(function()
 end)
 
 -- =================================================================
--- Blender: meshes sent with the "Send to Studio" add-on
+-- Blender: meshes sent with the "Send to Studio" add-on, and parts sent to Blender
 -- =================================================================
-do
+;(function()
+	local fromBlender -- (below) marks a part Blender just updated
 	local function blenderParts(key)
 		local list = {}
 		for _, d in ipairs(workspace:GetDescendants()) do
-			if d:IsA("MeshPart") and d:GetAttribute("BlenderKey") == key then
+			if d:IsA("BasePart") and d:GetAttribute("BlenderKey") == key then
 				table.insert(list, d)
 			end
 		end
@@ -5608,7 +5640,8 @@ do
 		local newSize = fresh.Size
 		local oldCenter = p:GetAttribute("BlenderCenter")
 		local oldSize = p:GetAttribute("BlenderSize")
-		if S.blenderKeepMoves and typeof(oldCenter) == "Vector3" then
+		if S.blenderKeepMoves and not p:GetAttribute("BlenderLinked") and typeof(oldCenter) == "Vector3" then
+			-- (linked parts send their moves to Blender, so Blender's copy already has them)
 			-- follow the change from Blender, but keep wherever you moved / turned it in Studio
 			cf = p.CFrame * CFrame.new(center - oldCenter)
 			if typeof(oldSize) == "Vector3" then
@@ -5640,14 +5673,20 @@ do
 				end)
 			end
 		end
-		fresh.TextureID = p.TextureID
+		pcall(function()
+			fresh.TextureID = p.TextureID
+		end)
 		copyAttributesAndTags(p, fresh)
 		fresh.Size = newSize
 		fresh.CFrame = cf
 		for _, child in ipairs(p:GetChildren()) do
-			pcall(function()
-				child.Parent = fresh
-			end)
+			if child:IsA("SpecialMesh") or child:IsA("FileMesh") then
+				child:Destroy() -- the part now is the mesh
+			else
+				pcall(function()
+					child.Parent = fresh
+				end)
+			end
 		end
 		applyLocalLook(fresh, ev)
 		stamp(fresh, ev, center, size)
@@ -5667,6 +5706,255 @@ do
 		end
 		return fresh
 	end
+
+	-- ---------------------------------------------------------------
+	-- Studio -> Blender: "Send to Blender" (toolbar). The part shows up in Blender and stays
+	-- linked both ways: move / resize / recolour it here and Blender follows, edit it in
+	-- Blender and this part updates.
+	-- ---------------------------------------------------------------
+	local quiet = setmetatable({}, { __mode = "k" }) -- part -> os.clock() until which changes are Blender's
+	local lastSent = setmetatable({}, { __mode = "k" }) -- part -> what Blender was last told (JSON)
+	local linked = setmetatable({}, { __mode = "k" }) -- part -> its connections
+	local dirty = setmetatable({}, { __mode = "k" })
+
+	local function meshHolder(p)
+		if p:IsA("MeshPart") then
+			return nil
+		end
+		for _, d in ipairs(p:GetChildren()) do
+			if (d:IsA("SpecialMesh") and d.MeshType == Enum.MeshType.FileMesh) or d:IsA("FileMesh") then
+				return d
+			end
+		end
+		return nil
+	end
+
+	-- What Blender needs to rebuild the part (nil = not a mesh Blender can get)
+	local function describe(p)
+		local holder = meshHolder(p)
+		local meshUri, tex, look, cf = "", "", "opaque", p.CFrame
+		local ev = {
+			key = p:GetAttribute("BlenderKey"),
+			name = p.Name,
+			color = { p.Color.R, p.Color.G, p.Color.B },
+			transparency = p.Transparency,
+		}
+		if p:IsA("MeshPart") then
+			meshUri = meshIdOf(p)
+			tex = textureOf(p)
+			ev.size = { p.Size.X, p.Size.Y, p.Size.Z }
+			ev.centerMesh = true -- a MeshPart shows its mesh centred on the part
+			for _, d in ipairs(p:GetChildren()) do
+				if d:IsA("SurfaceAppearance") then
+					local cm = ""
+					pcall(function()
+						cm = tostring(d.ColorMap)
+					end)
+					if cm == "" then
+						cm = contentUri(d, "ColorMapContent")
+					end
+					if cm ~= "" then
+						tex = cm
+					end
+					local okA, mode = pcall(function()
+						return d.AlphaMode
+					end)
+					if okA and mode == Enum.AlphaMode.Overlay then
+						look = "overlay"
+					elseif okA and mode == Enum.AlphaMode.Transparency then
+						look = "alpha"
+					end
+					break
+				end
+			end
+			local file = p:GetAttribute("MeshToolsTextureFile")
+			if type(file) == "string" then
+				tex, look = file, "overlay" -- painted head: Blender gets the unpainted picture + colour
+			end
+		elseif holder then
+			meshUri = holder.MeshId
+			tex = holder.TextureId
+			look = "overlay" -- SpecialMeshes show the part colour through see-through spots
+			ev.scale = { holder.Scale.X, holder.Scale.Y, holder.Scale.Z }
+			cf = p.CFrame * CFrame.new(holder.Offset)
+		else
+			return nil
+		end
+		ev.meshId = idFrom(meshUri)
+		if not ev.meshId then
+			return nil
+		end
+		local file = string.match(tex, "^[%w_%.%-]+%.%a+$") or string.match(tex, "meshtools/textures/([%w_%.%-]+%.%a+)$")
+		if file then
+			ev.texture = file
+		elseif tex ~= "" then
+			ev.textureId = idFrom(tex)
+		end
+		ev.look = look
+		ev.cframe = { cf:GetComponents() }
+		return ev
+	end
+
+	local function post(list, live)
+		local ok, res = request("POST", "/toblender", HttpService:JSONEncode({ parts = list, live = live }))
+		return ok and decodeBody(res) or nil
+	end
+
+	local function mark(p)
+		if (quiet[p] or 0) < os.clock() then
+			dirty[p] = true
+		end
+	end
+
+	local function link(p)
+		if linked[p] then
+			return
+		end
+		local conns = {}
+		local function watch(inst, props)
+			for _, prop in ipairs(props) do
+				pcall(function()
+					table.insert(conns, inst:GetPropertyChangedSignal(prop):Connect(function()
+						mark(p)
+					end))
+				end)
+			end
+		end
+		watch(p, { "CFrame", "Size", "Color", "Transparency", "TextureID", "MeshId", "Name" })
+		local holder = meshHolder(p)
+		if holder then
+			watch(holder, { "MeshId", "TextureId", "Scale", "Offset" })
+		end
+		table.insert(conns, p.ChildAdded:Connect(function()
+			mark(p)
+		end))
+		table.insert(conns, p.ChildRemoved:Connect(function()
+			mark(p)
+		end))
+		linked[p] = conns
+	end
+
+	-- a part Blender just updated: remember it as is, so it isn't sent straight back
+	fromBlender = function(p)
+		quiet[p] = os.clock() + 0.75
+		if p:GetAttribute("BlenderLinked") then
+			task.defer(function()
+				link(p)
+				local ev = describe(p)
+				lastSent[p] = ev and HttpService:JSONEncode(ev) or nil
+			end)
+		end
+	end
+
+	local function sendSelection()
+		local parts, seen = {}, {}
+		local function consider(inst)
+			if inst:IsA("SpecialMesh") or inst:IsA("FileMesh") then
+				inst = inst.Parent
+			end
+			if inst and inst:IsA("BasePart") and not seen[inst] and describe(inst) then
+				seen[inst] = true
+				table.insert(parts, inst)
+			end
+		end
+		for _, s in ipairs(Selection:Get()) do
+			consider(s)
+			for _, d in ipairs(s:GetDescendants()) do
+				consider(d)
+			end
+		end
+		if #parts == 0 then
+			warn("[Mesh Tools] Send to Blender: select MeshParts (or parts with a SpecialMesh) first.")
+			return
+		end
+		local finish = beginRecording("Send to Blender")
+		local list = {}
+		for _, p in ipairs(parts) do
+			local key = p:GetAttribute("BlenderKey")
+			if type(key) ~= "string" or not string.match(key, "^%x+$") or #key < 6 then
+				p:SetAttribute("BlenderKey", string.lower((string.gsub(HttpService:GenerateGUID(false), "%W", ""))))
+			end
+			p:SetAttribute("BlenderLinked", true)
+			local ev = describe(p)
+			lastSent[p] = HttpService:JSONEncode(ev)
+			table.insert(list, ev)
+			link(p)
+		end
+		finish(true)
+		local d = post(list, false)
+		if not d then
+			warn("[Mesh Tools] Send to Blender: open Mesh Downloader first.")
+		elseif (d.ready or 0) + (d.waiting or 0) == 0 then
+			warn("[Mesh Tools] Send to Blender: none of these meshes have a Roblox ID Mesh Downloader can get.")
+		else
+			local msg = string.format("[Mesh Tools] Sent %d part(s) to Blender", (d.ready or 0) + (d.waiting or 0))
+			if (d.waiting or 0) > 0 then
+				msg = msg .. string.format(" - %d downloading first%s", d.waiting, d.hasKey and "" or " (needs your API key in Mesh Downloader)")
+			end
+			print(msg .. ". Turn on 'Receive from Studio' in Blender's Roblox panel if nothing shows up.")
+		end
+	end
+
+	local sendButton = toolbar:CreateButton("Send to Blender", "Send the selected mesh parts to Blender - they stay linked both ways", "")
+	sendButton.ClickableWhenViewportHidden = true
+	sendButton.Click:Connect(function()
+		sendButton:SetActive(false)
+		local ok, err = pcall(sendSelection)
+		if not ok then
+			warn("[Mesh Tools] Send to Blender: " .. tostring(err))
+		end
+	end)
+
+	-- linked parts from before (place reopened) and copies: a Ctrl+D copy isn't linked
+	local function found(d)
+		if d:IsA("BasePart") and d:GetAttribute("BlenderLinked") then
+			local key = d:GetAttribute("BlenderKey")
+			for other in pairs(linked) do
+				if other ~= d and other.Parent and other:GetAttribute("BlenderKey") == key then
+					d:SetAttribute("BlenderLinked", nil)
+					d:SetAttribute("BlenderKey", nil)
+					return
+				end
+			end
+			link(d)
+			local ev = describe(d)
+			lastSent[d] = ev and HttpService:JSONEncode(ev) or nil
+		end
+	end
+	task.defer(function()
+		for _, d in ipairs(workspace:GetDescendants()) do
+			found(d)
+		end
+		workspace.DescendantAdded:Connect(function(d)
+			task.defer(found, d)
+		end)
+	end)
+
+	-- send what changed, a few times a second while you drag
+	task.spawn(function()
+		while alive do
+			task.wait(0.15)
+			if next(dirty) and S.blenderSync and not RunService:IsRunning() then
+				local list, parts = {}, {}
+				for p in pairs(dirty) do
+					dirty[p] = nil
+					if p.Parent and p:IsDescendantOf(workspace) and p:GetAttribute("BlenderLinked") then
+						local ev = describe(p)
+						local json = ev and HttpService:JSONEncode(ev)
+						if json and json ~= lastSent[p] then
+							table.insert(list, ev)
+							table.insert(parts, { p, json })
+						end
+					end
+				end
+				if #list > 0 and post(list, true) then
+					for _, pj in ipairs(parts) do
+						lastSent[pj[1]] = pj[2]
+					end
+				end
+			end
+		end
+	end)
 
 	local function handleBlender(ev)
 		if type(ev) ~= "table" or type(ev.key) ~= "string" then
@@ -5694,8 +5982,10 @@ do
 		local done, firstErr = 0, nil
 		if #existing > 0 then
 			for _, p in ipairs(existing) do
+				fromBlender(p)
 				local ok, err = updatePart(p, ev, center, size)
 				if ok then
+					fromBlender(ok)
 					done = done + 1
 				else
 					firstErr = firstErr or err
@@ -5712,6 +6002,7 @@ do
 				stamp(p, ev, center, size)
 				buildBones(p, ev.bones)
 				p.Parent = workspace
+				fromBlender(p)
 				done = 1
 				if S.blenderSelect then
 					Selection:Set({ p })
@@ -5764,7 +6055,7 @@ do
 			task.wait(waitFor)
 		end
 	end)
-end
+end)()
 
 -- Downloader status + update check (only while a window is open)
 task.spawn(function()

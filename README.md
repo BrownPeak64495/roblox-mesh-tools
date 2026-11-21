@@ -6,6 +6,7 @@
 - Build local copies of models whose MeshParts load your `.mesh` files (`rbxasset://meshtools/<id>.mesh`).
 - Browse, preview and insert everything you've downloaded.
 - **Blender to Studio, no upload:** the `mesh_tools_blender.py` add-on sends your object to Studio as a local `.mesh` (with its texture, bones and weights). Resending updates the same part; Live mode resends as you edit and moves the bones as you pose. See README.txt.
+- **Studio to Blender:** select parts > **Send to Blender** (toolbar). They arrive with their texture, colour, see-through spots and bones, and stay linked both ways - move or recolour in Studio and Blender follows, edit in Blender and Studio updates.
 - **Import .obj** in the Studio plugin: converts it to a local `.mesh` and inserts it.
 
 ## Install

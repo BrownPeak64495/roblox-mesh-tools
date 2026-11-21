@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.2'
+$AppVersion = '6.3'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1518,6 +1518,8 @@ $script:uploads = @{}
 
 # ---------------- Blender (Send to Studio add-on) ----------------
 $script:blenderEvents = New-Object System.Collections.Generic.List[object]
+$script:toBlender = New-Object System.Collections.Generic.List[object]       # Studio -> Blender, ready
+$script:toBlenderWait = New-Object System.Collections.Generic.List[object]   # waiting for a download
 $script:blenderTex = @{}        # texture hash -> file name in library\textures
 $script:blenderHist = @{}       # object key -> mesh ids sent this session (newest last)
 $script:blenderLog = @{}        # object key -> last time we logged it
@@ -1643,6 +1645,10 @@ function Receive-BlenderMesh($ctx) {
     $ev.alpha = [bool]$m.alpha
     $ev.double = [bool]$m.double
     if ($m.tint) { $ev.tint = @([double]$m.tint[0], [double]$m.tint[1], [double]$m.tint[2]) }
+    if ([string]$m.look -eq 'overlay' -and $m.color) {
+        $ev.look = 'overlay'
+        $ev.color = @([double]$m.color[0], [double]$m.color[1], [double]$m.color[2])
+    }
     $script:blenderEvents.Add($ev)
     Send-Json $ctx @{ ok = $true; id = $id }
 
@@ -1655,6 +1661,80 @@ function Receive-BlenderMesh($ctx) {
 }
 $script:modelBytesCache = @{ key = $null; bytes = $null }
 $script:tickCount = 0
+
+# ---------------- Studio -> Blender ----------------
+# A part from Studio, ready once its mesh (and picture) are in the library. $null if still missing.
+function Resolve-ToBlender($p, [bool]$noWait = $false) {
+    $id = [string]$p.meshId
+    if ($id -notmatch '^\d{5,}$') { return $null }
+    if (-not (Test-Path -LiteralPath (Join-Path $LibDir "$id.mesh"))) { return $null }
+    $tex = ''
+    $t = [string]$p.texture
+    if ($t -match '^[A-Za-z0-9_.-]+\.(png|jpg)$' -and (Test-Path -LiteralPath (Join-Path $TexDir $t))) { $tex = $t }
+    elseif ([string]$p.textureId -match '^\d{5,}$') {
+        $tex = (Get-TextureMap)[[string]$p.textureId]
+        if (-not $tex) {
+            if (-not $noWait) { return $null }
+            $tex = ''   # the picture couldn't be downloaded: send the mesh without it
+        }
+    }
+    $ev = @{ key = [string]$p.key; name = (Clean-Field ([string]$p.name)); meshId = $id; texture = $tex
+             look = [string]$p.look; transparency = [double]$p.transparency; centerMesh = [bool]$p.centerMesh }
+    foreach ($f in @('color', 'cframe', 'size', 'scale')) {
+        if ($p.$f) { $ev[$f] = [double[]]@($p.$f) }
+    }
+    return $ev
+}
+function Queue-ToBlender($ev) {
+    for ($i = $script:toBlender.Count - 1; $i -ge 0; $i--) {
+        if ($script:toBlender[$i].key -eq $ev.key) { $script:toBlender.RemoveAt($i) }   # newest only
+    }
+    $script:toBlender.Add($ev)
+}
+function Receive-ToBlender($ctx) {
+    $sr = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8)
+    $d = $sr.ReadToEnd() | ConvertFrom-Json; $sr.Close()
+    $ready = 0; $wait = 0; $bad = 0
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($p in @($d.parts)) {
+        if (-not $p -or [string]$p.key -notmatch '^[0-9a-f]{6,40}$') { $bad++; continue }
+        $ev = Resolve-ToBlender $p
+        if ($ev) { Queue-ToBlender $ev; $ready++; continue }
+        if ([string]$p.meshId -notmatch '^\d{5,}$') { $bad++; continue }
+        # not downloaded yet: get it, then pass it on
+        for ($i = $script:toBlenderWait.Count - 1; $i -ge 0; $i--) {
+            if ($script:toBlenderWait[$i].part.key -eq [string]$p.key) { $script:toBlenderWait.RemoveAt($i) }
+        }
+        $script:toBlenderWait.Add(@{ part = $p; since = (Get-Date) })
+        $wait++
+        $mid = [string]$p.meshId
+        if (-not (Test-Path -LiteralPath (Join-Path $LibDir "$mid.mesh"))) { $lines.Add($mid) }
+        if ([string]$p.textureId -match '^\d{5,}$' -and -not (Get-TextureMap)[[string]$p.textureId]) { [void]$script:texQueue.Add([string]$p.textureId) }
+    }
+    if ($lines.Count -gt 0) { Add-ToQueue ([string[]]($lines | Select-Object -Unique)) }
+    if ($wait -gt 0) { $script:autoStartPending = $true }
+    if ($ready + $wait -gt 0 -and -not $d.live) {
+        Log ("Studio: sending {0} part(s) to Blender{1}." -f ($ready + $wait), $(if ($wait) { " ($wait downloading first)" } else { '' }))
+    }
+    Send-Json $ctx @{ ok = $true; ready = $ready; waiting = $wait; skipped = $bad; hasKey = [bool]$KeyBox.Password.Trim() }
+}
+function Check-ToBlenderWait {
+    for ($i = $script:toBlenderWait.Count - 1; $i -ge 0; $i--) {
+        $w = $script:toBlenderWait[$i]
+        $ev = Resolve-ToBlender $w.part (-not $script:busy -and -not $script:autoStartPending)
+        if ($ev) { Queue-ToBlender $ev; $script:toBlenderWait.RemoveAt($i) }
+        elseif (((Get-Date) - $w.since).TotalMinutes -gt 10) { $script:toBlenderWait.RemoveAt($i) }
+    }
+}
+function Send-Bytes($ctx, [byte[]]$bytes, [string]$type) {
+    try {
+        $ctx.Response.StatusCode = 200
+        $ctx.Response.ContentType = $type
+        $ctx.Response.ContentLength64 = $bytes.Length
+        $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $ctx.Response.OutputStream.Close()
+    } catch { }
+}
 
 function Send-Json($ctx, $obj, [int]$code = 200) {
     try {
@@ -1763,6 +1843,28 @@ function Handle-Request($ctx) {
         if ($path -eq '/blender/mesh' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderMesh $ctx; return }
         if ($path -eq '/blender/texture' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderTexture $ctx; return }
         if ($path -eq '/blender/pose' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderPose $ctx; return }
+        if ($path -eq '/toblender' -and $ctx.Request.HttpMethod -eq 'POST') { $script:lastPing = Get-Date; Receive-ToBlender $ctx; return }
+        if ($path -eq '/blender/incoming') {
+            Check-ToBlenderWait
+            $ev = [object[]]$script:toBlender.ToArray()
+            $script:toBlender.Clear()
+            Send-Json $ctx @{ ok = $true; events = $ev; waiting = $script:toBlenderWait.Count }
+            return
+        }
+        if ($path -eq '/blender/file') {
+            $kind = [string]$ctx.Request.QueryString['kind']
+            $full = $null
+            if ($kind -eq 'mesh') {
+                $id = [string]$ctx.Request.QueryString['id']
+                if ($id -match '^\d{5,}$') { $full = Join-Path $LibDir "$id.mesh" }
+            } elseif ($kind -eq 'tex') {
+                $n = [string]$ctx.Request.QueryString['name']
+                if ($n -match '^[A-Za-z0-9_.-]+\.(png|jpg)$') { $full = Join-Path $TexDir $n }
+            }
+            if (-not $full -or -not (Test-Path -LiteralPath $full)) { Send-Json $ctx @{ ok = $false; error = 'not found' } 404; return }
+            Send-Bytes $ctx ([IO.File]::ReadAllBytes($full)) 'application/octet-stream'
+            return
+        }
         if ($path -eq '/blender/next') {
             $script:lastPing = Get-Date
             $ev = [object[]]$script:blenderEvents.ToArray()

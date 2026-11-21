@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 4, 0),
+    "version": (1, 5, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -500,6 +500,27 @@ def _image_upstream(sock, depth=0):
     return None
 
 
+def _overlay_colour(base):
+    """sRGB colour if Base Color is Mix(colour, picture, factor = picture alpha), else None."""
+    if base is None or not base.is_linked:
+        return None
+    node = base.links[0].from_node
+    if node.type not in ("MIX", "MIX_RGB"):
+        return None
+    socks = [i for i in node.inputs if i.enabled] if hasattr(node.inputs[0], "enabled") else list(node.inputs)
+    fac = next((i for i in socks if i.type == "VALUE" or i.name in ("Fac", "Factor")), None)
+    if fac is None or not fac.is_linked:
+        return None
+    src = fac.links[0]
+    if src.from_node.type != "TEX_IMAGE" or src.from_socket.name != "Alpha":
+        return None
+    cols = [i for i in socks if i.type == "RGBA"]
+    plain = next((i for i in cols if not i.is_linked), None)
+    if plain is None:
+        return None
+    return [_to_srgb(c) for c in plain.default_value[:3]]
+
+
 def _image_bytes(img):
     """(bytes, ext) of a Blender image as PNG/JPG."""
     if img is None:
@@ -561,6 +582,12 @@ def get_material(obj):
     img = _image_upstream(base)
     if img is not None:
         out["maps"]["color"] = img
+        over = _overlay_colour(base)
+        if over is not None:
+            # picture over a plain colour through its see-through spots (a Roblox Overlay /
+            # SpecialMesh look): Studio paints it over the part colour, so the colour stays editable
+            out["look"] = "overlay"
+            out["color"] = over
     elif base is not None and not base.is_linked:
         out["tint"] = [_to_srgb(c) for c in base.default_value[:3]]
     alpha = bsdf.inputs.get("Alpha")
@@ -602,6 +629,9 @@ def send_object(obj, props, depsgraph):
             "maps": maps, "alpha": look["alpha"], "double": look["double"]}
     if look["tint"] is not None:
         meta["tint"] = look["tint"]
+    if look.get("look"):
+        meta["look"] = look["look"]
+        meta["color"] = look["color"]
     if info.get("bones"):
         meta["bones"] = info["bones"]
     res = _post(props, "/blender/mesh", meta, data)
@@ -614,6 +644,12 @@ def send_object(obj, props, depsgraph):
         res = _post(props, "/blender/mesh", meta, data)
     if not res.get("ok"):
         raise RuntimeError(str(res.get("error") or "Mesh Downloader said no"))
+    if res.get("id"):
+        target = _move_target(obj)
+        obj["roblox_sent_id"] = str(res["id"])
+        obj["roblox_sent_center"] = [float(c) for c in info["center"]]
+        obj["roblox_sent_size"] = [float(c) for c in info["size"]]
+        obj["roblox_sent_matrix"] = [float(x) for row in target.matrix_world for x in row]
 
     if info.get("bones"):
         _state["sent"][key] = info
@@ -697,7 +733,7 @@ def _flush():
 @persistent
 def _on_depsgraph(scene, depsgraph):
     props = getattr(scene, "roblox_mesh_tools", None)
-    if props is None or not props.live or _state["busy"]:
+    if props is None or not props.live or _state["busy"] or time.time() < _state.get("quiet_until", 0):
         return
     mesh_changed = False
     pose_changed = False
@@ -747,6 +783,669 @@ def _redraw():
         pass
 
 
+# ------------------------------------------------------------------ reading .mesh files (Studio -> Blender, Import)
+
+
+class MeshError(Exception):
+    pass
+
+
+def _v1(data):
+    text = data.decode("ascii", "replace").splitlines()
+    ver = text[0].strip()
+    nf = int(text[1].strip())
+    nums = [float(x) for x in __import__("re").findall(r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", " ".join(text[2:]))]
+    # every vertex: [px,py,pz][nx,ny,nz][u,v,w]
+    arr = np.array(nums[: nf * 3 * 9], dtype=np.float32).reshape(-1, 9)
+    pos = arr[:, 0:3] * (0.5 if ver == "version 1.00" else 1.0)
+    uv = arr[:, 6:8].copy()
+    uv[:, 1] = 1.0 - uv[:, 1]          # 1.0x stores v the other way round
+    faces = np.arange(len(arr), dtype=np.uint32).reshape(-1, 3)
+    return {"pos": pos, "nrm": arr[:, 3:6], "uv": uv, "faces": faces, "bones": [], "skin_idx": None, "skin_w": None}
+
+
+def _verts(data, off, nv, stride):
+    raw = np.frombuffer(data, dtype=np.uint8, count=nv * stride, offset=off).reshape(nv, stride)
+    f = raw[:, 0:36].copy().view("<f4").reshape(nv, 9)
+    return f[:, 0:3], f[:, 3:6], f[:, 6:8]
+
+
+def _bones_names_subsets(data, p, nb, names_size, nsub):
+    bones = []
+    raw = []
+    for i in range(nb):
+        ni, par, _lod, _cull = struct.unpack_from("<IHHf", data, p)
+        r = np.array(struct.unpack_from("<9f", data, p + 12), dtype=np.float64).reshape(3, 3)
+        t = np.array(struct.unpack_from("<3f", data, p + 48), dtype=np.float64)
+        raw.append((ni, par, r, t))
+        p += 60
+    names = data[p:p + names_size]
+    p += names_size
+    for ni, par, r, t in raw:
+        end = names.find(b"\0", ni)
+        nm = names[ni:end if end >= 0 else None].decode("utf-8", "replace")
+        bones.append({"n": nm, "p": -1 if par == 0xFFFF else par, "pos": t, "rot": r})
+    subsets = []
+    for i in range(nsub):
+        fb, fl, vb, vl, nbi = struct.unpack_from("<5I", data, p)
+        ids = struct.unpack_from("<26H", data, p + 20)[:nbi]
+        subsets.append((fb, fl, vb, vl, ids))
+        p += 72
+    return bones, subsets, p
+
+
+def _global_skin(local, nv, subsets):
+    """Subset-local bone numbers -> bone list numbers."""
+    idx = np.zeros((nv, 4), dtype=np.int32)
+    w = local[:, 4:8].astype(np.float32) / 255.0
+    for fb, fl, vb, vl, ids in subsets:
+        table = np.array(list(ids) + [0], dtype=np.int32)
+        li = local[vb:vb + vl, 0:4].astype(np.int32)
+        li = np.where(li < len(ids), li, len(ids))
+        idx[vb:vb + vl] = table[li]
+    return idx, w
+
+
+def _v2_to_v5(data, ver, off):
+    if ver.startswith("version 2."):
+        hs, vs, fs, nv, nf = struct.unpack_from("<HBBII", data, off)
+        p = off + hs
+        pos, nrm, uv = _verts(data, p, nv, vs)
+        p += nv * vs
+        faces = np.frombuffer(data, dtype="<u4", count=nf * 3, offset=p).reshape(nf, 3)
+        return {"pos": pos, "nrm": nrm, "uv": uv, "faces": faces, "bones": [], "skin_idx": None, "skin_w": None}
+    if ver.startswith("version 3."):
+        hs, vs, fs, lodsz, nlod, nv, nf = struct.unpack_from("<HBBHHII", data, off)
+        p = off + hs
+        pos, nrm, uv = _verts(data, p, nv, vs)
+        p += nv * vs
+        faces = np.frombuffer(data, dtype="<u4", count=nf * 3, offset=p).reshape(nf, 3)
+        p += nf * 12
+        if nlod >= 2:
+            lods = struct.unpack_from("<%dI" % nlod, data, p)
+            faces = faces[lods[0]:lods[1]]
+        return {"pos": pos, "nrm": nrm, "uv": uv, "faces": faces, "bones": [], "skin_idx": None, "skin_w": None}
+    # 4.00 / 4.01 / 5.00
+    hs, lodtype, nv, nf, nlod, nb, names_size, nsub, hq, _pad = struct.unpack_from("<HHIIHHIHBB", data, off)
+    p = off + hs
+    pos, nrm, uv = _verts(data, p, nv, 40)
+    p += nv * 40
+    local = None
+    if nb > 0:
+        local = np.frombuffer(data, dtype=np.uint8, count=nv * 8, offset=p).reshape(nv, 8)
+        p += nv * 8
+    faces = np.frombuffer(data, dtype="<u4", count=nf * 3, offset=p).reshape(nf, 3)
+    p += nf * 12
+    lods = struct.unpack_from("<%dI" % nlod, data, p) if nlod else ()
+    p += nlod * 4
+    if len(lods) >= 2:
+        faces = faces[lods[0]:lods[1]]
+    bones, subsets, p = _bones_names_subsets(data, p, nb, names_size, nsub)
+    out = {"pos": pos, "nrm": nrm, "uv": uv, "faces": faces, "bones": bones, "skin_idx": None, "skin_w": None}
+    if local is not None:
+        out["skin_idx"], out["skin_w"] = _global_skin(local, nv, subsets)
+    return out
+
+
+def _draco(blob):
+    """Decode Roblox's Draco-compressed COREMESH (version 2) with the Draco library that
+    Blender's own glTF importer ships."""
+    import ctypes
+    import os
+    try:
+        import io_scene_gltf2
+    except Exception:
+        import addon_utils
+        addon_utils.enable("io_scene_gltf2", default_set=False)
+        import io_scene_gltf2
+    folder = os.path.dirname(io_scene_gltf2.__file__)
+    for name in ("extern_draco.dll", "libextern_draco.so", "libextern_draco.dylib"):
+        path = os.path.join(folder, name)
+        if os.path.isfile(path):
+            break
+    else:
+        raise MeshError("this Blender has no Draco decoder (it comes with the glTF add-on)")
+    dll = ctypes.cdll.LoadLibrary(path)
+    dll.decoderCreate.restype = ctypes.c_void_p
+    dll.decoderRelease.argtypes = [ctypes.c_void_p]
+    dll.decoderDecode.restype = ctypes.c_bool
+    dll.decoderDecode.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+    dll.decoderReadAttribute.restype = ctypes.c_bool
+    dll.decoderReadAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_size_t, ctypes.c_char_p]
+    dll.decoderGetVertexCount.restype = ctypes.c_uint32
+    dll.decoderGetVertexCount.argtypes = [ctypes.c_void_p]
+    dll.decoderGetIndexCount.restype = ctypes.c_uint32
+    dll.decoderGetIndexCount.argtypes = [ctypes.c_void_p]
+    dll.decoderGetAttributeByteLength.restype = ctypes.c_size_t
+    dll.decoderGetAttributeByteLength.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    dll.decoderCopyAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p]
+    dll.decoderReadIndices.restype = ctypes.c_bool
+    dll.decoderReadIndices.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    dll.decoderGetIndicesByteLength.restype = ctypes.c_size_t
+    dll.decoderGetIndicesByteLength.argtypes = [ctypes.c_void_p]
+    dll.decoderCopyIndices.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    dec = dll.decoderCreate()
+    try:
+        buf = ctypes.create_string_buffer(bytes(blob), len(blob))
+        if not dll.decoderDecode(dec, buf, len(blob)):
+            raise MeshError("couldn't decode the compressed mesh")
+        nv = dll.decoderGetVertexCount(dec)
+
+        def attr(uid, comp, typ, dtype, width):
+            if not dll.decoderReadAttribute(dec, uid, comp, typ):
+                return None
+            n = dll.decoderGetAttributeByteLength(dec, uid)
+            out = ctypes.create_string_buffer(n)
+            dll.decoderCopyAttribute(dec, uid, out)
+            return np.frombuffer(out.raw, dtype=dtype).reshape(nv, width).copy()
+
+        pos = attr(0, 5126, b"VEC3", "<f4", 3)
+        nrm = attr(1, 5126, b"VEC3", "<f4", 3)
+        uv = attr(2, 5126, b"VEC2", "<f4", 2)
+        if not dll.decoderReadIndices(dec, 5125):
+            raise MeshError("couldn't decode the mesh's triangles")
+        n = dll.decoderGetIndicesByteLength(dec)
+        out = ctypes.create_string_buffer(n)
+        dll.decoderCopyIndices(dec, out)
+        faces = np.frombuffer(out.raw, dtype="<u4").reshape(-1, 3).copy()
+    finally:
+        dll.decoderRelease(dec)
+    if pos is None:
+        raise MeshError("compressed mesh has no positions")
+    if nrm is None:
+        nrm = np.zeros_like(pos)
+    if uv is None:
+        uv = np.zeros((nv, 2), dtype=np.float32)
+    return pos, nrm, uv, faces
+
+
+def _chunked(data, off):
+    chunks = {}
+    p = off
+    while p + 16 <= len(data):
+        name = data[p:p + 8].rstrip(b"\0").decode("ascii", "replace")
+        ver, size = struct.unpack_from("<II", data, p + 8)
+        chunks[name] = (ver, data[p + 16:p + 16 + size])
+        p += 16 + size
+    if "COREMESH" not in chunks:
+        raise MeshError("no COREMESH chunk")
+    ver, core = chunks["COREMESH"]
+    if ver == 1:
+        nv, = struct.unpack_from("<I", core, 0)
+        pos, nrm, uv = _verts(core, 4, nv, 40)
+        nf, = struct.unpack_from("<I", core, 4 + nv * 40)
+        faces = np.frombuffer(core, dtype="<u4", count=nf * 3, offset=8 + nv * 40).reshape(nf, 3)
+    elif ver == 2:
+        n, = struct.unpack_from("<I", core, 0)
+        pos, nrm, uv, faces = _draco(core[4:4 + n])
+    else:
+        raise MeshError("unknown COREMESH version %d" % ver)
+    if "LODS" in chunks:
+        lv, lod = chunks["LODS"]
+        try:
+            _t, _hq, nl = struct.unpack_from("<HBI", lod, 0)
+            offs = struct.unpack_from("<%dI" % nl, lod, 7)
+            if nl >= 2 and offs[1] > offs[0]:
+                faces = faces[offs[0]:offs[1]]
+        except struct.error:
+            pass
+    out = {"pos": pos, "nrm": nrm, "uv": uv, "faces": faces, "bones": [], "skin_idx": None, "skin_w": None}
+    if "SKINNING" in chunks:
+        sk = chunks["SKINNING"][1]
+        ns, = struct.unpack_from("<I", sk, 0)
+        local = np.frombuffer(sk, dtype=np.uint8, count=ns * 8, offset=4).reshape(ns, 8)
+        p = 4 + ns * 8
+        nb, = struct.unpack_from("<I", sk, p)
+        p += 4
+        # bones, then the name table size, then names, then subsets
+        q = p + nb * 60
+        names_size, = struct.unpack_from("<I", sk, q)
+        bone_part = sk[p:p + nb * 60] + sk[q + 4:q + 4 + names_size]
+        nsub, = struct.unpack_from("<I", sk, q + 4 + names_size)
+        tail = sk[q + 8 + names_size:]
+        bones, subsets, _ = _bones_names_subsets(bone_part + tail, 0, nb, names_size, nsub)
+        out["bones"] = bones
+        if ns == len(pos):
+            out["skin_idx"], out["skin_w"] = _global_skin(local, ns, subsets)
+    return out
+
+
+def read_mesh(data):
+    data = bytes(data)
+    nl = data.find(b"\n")
+    if nl < 0 or nl > 32 or not data.startswith(b"version "):
+        raise MeshError("not a Roblox .mesh file")
+    ver = data[:nl].decode("ascii").strip()
+    off = nl + 1
+    if ver.startswith("version 1."):
+        out = _v1(data)
+    elif ver[8:9] in "2345":
+        out = _v2_to_v5(data, ver, off)
+    elif ver[8:9] in "67":
+        out = _chunked(data, off)
+    else:
+        raise MeshError("unsupported " + ver)
+    out["version"] = ver
+    out["pos"] = np.asarray(out["pos"], dtype=np.float32)
+    out["faces"] = np.asarray(out["faces"], dtype=np.uint32)
+    # drop triangles that point past the vertex list (damaged files)
+    ok = (out["faces"] < len(out["pos"])).all(axis=1)
+    out["faces"] = out["faces"][ok]
+    return out
+
+
+def _srgb_to_linear(c):
+    c = max(0.0, min(1.0, float(c)))
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _mix_node(nt):
+    """A colour Mix node (newer Blender: ShaderNodeMix, older: ShaderNodeMixRGB) -> (node, fac, a, b, out)."""
+    try:
+        n = nt.nodes.new("ShaderNodeMix")
+        n.data_type = "RGBA"
+        a = next(i for i in n.inputs if i.name == "A" and i.type == "RGBA")
+        b = next(i for i in n.inputs if i.name == "B" and i.type == "RGBA")
+        out = next(o for o in n.outputs if o.name == "Result" and o.type == "RGBA")
+        return n, n.inputs[0], a, b, out
+    except Exception:
+        n = nt.nodes.new("ShaderNodeMixRGB")
+        return n, n.inputs[0], n.inputs[1], n.inputs[2], n.outputs[0]
+
+
+def make_material(name, image, look, color, transparency):
+    """Sets up a material the way Roblox draws the part:
+    opaque  = TextureID on a MeshPart (see-through spots show the picture's hidden colour)
+    overlay = SpecialMesh / SurfaceAppearance Overlay (see-through spots show the part colour)
+    alpha   = SurfaceAppearance Transparency (see-through spots are see-through)"""
+    mat = bpy.data.materials.new(name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    bsdf = next(n for n in nt.nodes if n.type == "BSDF_PRINCIPLED")
+    col = [_srgb_to_linear(c) for c in (color or (1, 1, 1))] + [1.0]
+    mat["roblox_look"] = look
+    mat["roblox_color"] = list(color or (1, 1, 1))
+    mat["roblox_transparency"] = float(transparency or 0)
+    alpha_sock = None
+    if image is None:
+        bsdf.inputs["Base Color"].default_value = col
+    else:
+        tex = nt.nodes.new("ShaderNodeTexImage")
+        tex.image = image
+        tex.location = (-600, 200)
+        if look == "overlay":
+            mix, fac, a, b, out = _mix_node(nt)
+            mix.location = (-300, 250)
+            a.default_value = col
+            nt.links.new(tex.outputs["Alpha"], fac)
+            nt.links.new(tex.outputs["Color"], b)
+            nt.links.new(out, bsdf.inputs["Base Color"])
+        else:
+            nt.links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+            if look == "alpha":
+                alpha_sock = tex.outputs["Alpha"]
+    t = float(transparency or 0)
+    if alpha_sock is not None and t > 0.001:
+        mul = nt.nodes.new("ShaderNodeMath")
+        mul.operation = "MULTIPLY"
+        mul.inputs[1].default_value = 1.0 - t
+        nt.links.new(alpha_sock, mul.inputs[0])
+        nt.links.new(mul.outputs[0], bsdf.inputs["Alpha"])
+    elif alpha_sock is not None:
+        nt.links.new(alpha_sock, bsdf.inputs["Alpha"])
+    elif t > 0.001:
+        bsdf.inputs["Alpha"].default_value = 1.0 - t
+    if alpha_sock is not None or t > 0.001:
+        if hasattr(mat, "surface_render_method"):
+            mat.surface_render_method = "DITHERED"
+        else:
+            mat.blend_method = "HASHED"
+    mat.use_backface_culling = False
+    return mat
+
+
+def _move_target(obj):
+    """What to move when the part moves: the armature for rigged meshes, else the object."""
+    return obj.parent if (obj.parent is not None and obj.parent.type == "ARMATURE") else obj
+
+
+def _rbx_matrix(cf, scale=None):
+    m = np.eye(4)
+    m[:3, :3] = np.array(cf[3:12], dtype=np.float64).reshape(3, 3)
+    if scale is not None:
+        m[:3, :3] = m[:3, :3] @ np.diag(scale)
+    m[:3, 3] = cf[0:3]
+    return m
+
+
+def _to_blender_space(m, props):
+    """Roblox-space 4x4 (studs) -> Blender-space 4x4 (metres)."""
+    ax = _axis_matrix(props)
+    k = np.eye(4)
+    k[:3, :3] = ax.T / props.studs_per_meter
+    ki = np.eye(4)
+    ki[:3, :3] = ax * props.studs_per_meter
+    return k @ m @ ki
+
+
+def _follow_studio(obj, ev, props):
+    """The part shows the mesh this object last sent: move / turn / resize the object the same way."""
+    import mathutils
+    c0 = obj.get("roblox_sent_center")
+    s0 = obj.get("roblox_sent_size")
+    m0 = obj.get("roblox_sent_matrix")
+    if c0 is None or s0 is None or m0 is None or not ev.get("cframe"):
+        return
+    size = ev.get("size") or list(s0)
+    ratio = [float(a) / float(b) if abs(float(b)) > 1e-6 else 1.0 for a, b in zip(size, s0)]
+    sent = np.eye(4)
+    sent[:3, 3] = list(c0)
+    now = _rbx_matrix(ev["cframe"], ratio)
+    delta = _to_blender_space(now @ np.linalg.inv(sent), props)
+    new = delta @ np.array(list(m0), dtype=np.float64).reshape(4, 4)
+    _move_target(obj).matrix_world = mathutils.Matrix(new.tolist())
+
+
+def _cframe_matrix(cf, props):
+    """Roblox CFrame (x, y, z, R00..R22) -> Blender object matrix."""
+    import mathutils
+    ax = _axis_matrix(props)
+    s = props.studs_per_meter
+    r = np.array(cf[3:12], dtype=np.float64).reshape(3, 3)
+    t = np.array(cf[0:3], dtype=np.float64)
+    rb = ax.T @ r @ ax
+    tb = ax.T @ t / s
+    m = mathutils.Matrix.Identity(4)
+    for i in range(3):
+        for j in range(3):
+            m[i][j] = rb[i, j]
+        m[i][3] = tb[i]
+    return m
+
+
+def build_object(name, mesh, props, scale=(1, 1, 1), image=None, look="opaque", color=None, transparency=0.0, matrix=None):
+    """Makes a Blender object (and an armature when the mesh has bones) from a read .mesh."""
+    ax = _axis_matrix(props)
+    s = props.studs_per_meter
+    sc = np.array(scale, dtype=np.float64)
+    pos = mesh["pos"].astype(np.float64) * sc
+    nrm = mesh["nrm"].astype(np.float64) / np.where(sc == 0, 1, sc)
+    ln = np.linalg.norm(nrm, axis=1, keepdims=True)
+    ln[ln == 0] = 1
+    nrm /= ln
+    vb = pos @ ax / s                     # Roblox mesh space -> Blender object space
+    nb = nrm @ ax
+    faces = mesh["faces"].astype(np.int64)
+
+    me = bpy.data.meshes.new(name)
+    me.from_pydata(vb.tolist(), [], faces.tolist())
+    me.update()
+    uv = mesh["uv"].astype(np.float64).copy()
+    if props.flip_v:
+        uv[:, 1] = 1.0 - uv[:, 1]
+    uvl = me.uv_layers.new(name="UVMap")
+    lv = np.empty(len(me.loops), dtype=np.int32)
+    me.loops.foreach_get("vertex_index", lv)
+    uvl.data.foreach_set("uv", uv[lv].astype(np.float32).ravel())
+    for poly in me.polygons:
+        poly.use_smooth = True
+    try:
+        if hasattr(me, "use_auto_smooth"):
+            me.use_auto_smooth = True
+        me.normals_split_custom_set_from_vertices(nb.tolist())
+    except Exception:
+        pass
+    obj = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(obj)
+    if matrix is not None:
+        obj.matrix_world = matrix
+    if look or image is not None or color is not None:
+        me.materials.append(make_material(name, image, look, color, transparency))
+
+    if mesh["bones"]:
+        arm_data = bpy.data.armatures.new(name + "_Rig")
+        rig = bpy.data.objects.new(name + "_Rig", arm_data)
+        bpy.context.scene.collection.objects.link(rig)
+        rig.matrix_world = obj.matrix_world.copy()
+        prev = bpy.context.view_layer.objects.active
+        bpy.context.view_layer.objects.active = rig
+        bpy.ops.object.mode_set(mode="EDIT")
+        heads = [np.array(b["pos"]) * sc @ ax / s for b in mesh["bones"]]
+        size = float(np.linalg.norm(vb.max(axis=0) - vb.min(axis=0))) or 1.0
+        made = []
+        for i, b in enumerate(mesh["bones"]):
+            eb = arm_data.edit_bones.new(b["n"] or ("Bone%d" % i))
+            eb.head = heads[i].tolist()
+            kids = [j for j, c in enumerate(mesh["bones"]) if c["p"] == i and np.linalg.norm(heads[j] - heads[i]) > 1e-4]
+            if kids:
+                tail = heads[kids[0]]
+            else:
+                tail = heads[i] + np.array([0, 0, size * 0.05])
+            if np.linalg.norm(tail - heads[i]) < 1e-4:
+                tail = heads[i] + np.array([0, 0, size * 0.05])
+            eb.tail = tail.tolist()
+            made.append(eb)
+        for i, b in enumerate(mesh["bones"]):
+            if 0 <= b["p"] < len(made):
+                made[i].parent = made[b["p"]]
+        bpy.ops.object.mode_set(mode="OBJECT")
+        bpy.context.view_layer.objects.active = prev
+        names = [bn.name for bn in made] if False else [arm_data.bones[i].name for i in range(len(arm_data.bones))]
+        groups = [obj.vertex_groups.new(name=b["n"] or ("Bone%d" % i)) for i, b in enumerate(mesh["bones"])]
+        if mesh["skin_idx"] is not None:
+            for v in range(len(pos)):
+                for k in range(4):
+                    w = float(mesh["skin_w"][v, k])
+                    if w > 0:
+                        groups[int(mesh["skin_idx"][v, k])].add([v], w, "ADD")
+        mod = obj.modifiers.new("Armature", "ARMATURE")
+        mod.object = rig
+        obj.parent = rig
+        obj.matrix_parent_inverse = rig.matrix_world.inverted()
+    return obj
+
+
+# ------------------------------------------------------------------ Studio -> Blender
+def _get(props, path, timeout=2.0):
+    with _opener.open(_url(props, path), timeout=timeout) as r:
+        return r.read()
+
+
+def _find_linked(key):
+    for o in bpy.data.objects:
+        if o.get(KEY_PROP) == key and o.type == "MESH":
+            return o
+    return None
+
+
+def _remove_object(o):
+    rig = o.parent if (o.parent is not None and o.parent.type == "ARMATURE") else None
+    bpy.data.objects.remove(o, do_unlink=True)
+    if rig is not None and not rig.children:
+        bpy.data.objects.remove(rig, do_unlink=True)
+
+
+def apply_studio_event(ev, props):
+    """A part sent from Studio: make it (or update the linked object)."""
+    key = str(ev.get("key") or "")
+    mesh_id = str(ev.get("meshId") or "")
+    if not key or not mesh_id:
+        return
+    matrix = _cframe_matrix(ev["cframe"], props) if ev.get("cframe") else None
+    obj = _find_linked(key)
+    if obj is not None and mesh_id == str(obj.get("roblox_sent_id") or ""):
+        _follow_studio(obj, ev, props)            # Studio shows what this object sent
+        _set_colour(obj, ev)
+        return
+    if obj is not None and obj.get("roblox_sent_id"):
+        # Studio shows an older mesh (undo?) - never rebuild over work done in Blender
+        _state["status"] = "Studio shows an older mesh for %s - kept yours (send it again to update Studio)" % obj.name
+        return
+    tex_name = str(ev.get("texture") or "")
+    look = str(ev.get("look") or "opaque")
+    color = ev.get("color") or [1, 1, 1]
+    transparency = float(ev.get("transparency") or 0)
+    scale_key = json.dumps([round(float(x), 4) for x in (ev.get("scale") or ev.get("size") or [])])
+    same_mesh = obj is not None and obj.get("roblox_mesh_id") == mesh_id and obj.get("roblox_scale") == scale_key
+    same_look = obj is not None and obj.get("roblox_look_key") == "%s|%s|%.3f" % (tex_name, look, transparency)
+    if same_mesh:
+        # only moved / recoloured: no need to rebuild
+        target = obj.parent if (obj.parent is not None and obj.parent.type == "ARMATURE") else obj
+        if matrix is not None:
+            target.matrix_world = matrix
+        if not same_look:
+            old = [m for m in obj.data.materials if m is not None]
+            obj.data.materials.clear()
+            for m in old:
+                if m.users == 0:
+                    bpy.data.materials.remove(m)
+            img = _studio_image(props, tex_name)
+            obj.data.materials.append(make_material(obj.name, img, look, color, transparency))
+        else:
+            _set_colour(obj, ev)
+            obj["roblox_look_key"] = "%s|%s|%.3f" % (tex_name, look, transparency)
+        return
+    mesh = read_mesh(_get(props, "/blender/file?kind=mesh&id=" + mesh_id, 10))
+    if ev.get("centerMesh"):
+        mid = (mesh["pos"].max(axis=0) + mesh["pos"].min(axis=0)) / 2.0
+        mesh["pos"] = mesh["pos"] - mid
+        for b in mesh["bones"]:
+            b["pos"] = (np.array(b["pos"], dtype=np.float64) - mid).tolist()
+    if ev.get("scale"):
+        scale = [float(x) for x in ev["scale"]]
+    elif ev.get("size"):
+        ext = mesh["pos"].max(axis=0) - mesh["pos"].min(axis=0)
+        scale = [float(sz) / float(e) if e > 1e-6 else 1.0 for sz, e in zip(ev["size"], ext)]
+    else:
+        scale = [1.0, 1.0, 1.0]
+    name = str(ev.get("name") or "Roblox mesh")
+    if obj is not None:
+        name = obj.name
+        _remove_object(obj)
+    img = _studio_image(props, tex_name)
+    new = build_object(name, mesh, props, scale, img, look, color, transparency, matrix)
+    if new.parent is not None and matrix is not None:
+        new.parent.matrix_world = matrix
+        new.matrix_world = matrix
+    new[KEY_PROP] = key
+    new["roblox_mesh_id"] = mesh_id
+    if not props.live:
+        props.live = True                    # so edits here go back to the linked part
+    new["roblox_scale"] = scale_key
+    new["roblox_look_key"] = "%s|%s|%.3f" % (tex_name, look, transparency)
+    _state["status"] = "From Studio: %s (%d tris%s)" % (name, len(mesh["faces"]),
+                                                        ", %d bones" % len(mesh["bones"]) if mesh["bones"] else "")
+
+
+def _set_colour(obj, ev):
+    """Studio changed the colour of a part whose look is picture-over-colour: follow it."""
+    if not ev.get("color"):
+        return
+    for slot in obj.material_slots:
+        mat = slot.material
+        if mat is None or not mat.use_nodes:
+            continue
+        bsdf = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        base = bsdf and bsdf.inputs.get("Base Color")
+        if base is None:
+            continue
+        want = [_srgb_to_linear(c) for c in ev["color"]] + [1.0]
+        if not base.is_linked and "roblox_look" in mat:
+            # plain colour, no picture (only materials made from Studio parts)
+            if any(abs(a - b) > 1e-4 for a, b in zip(base.default_value, want)):
+                base.default_value = want
+            return
+        if _overlay_colour(base) is None:
+            continue
+        node = base.links[0].from_node
+        socks = [i for i in node.inputs if i.enabled] if hasattr(node.inputs[0], "enabled") else list(node.inputs)
+        plain = next(i for i in socks if i.type == "RGBA" and not i.is_linked)
+        if any(abs(a - b) > 1e-4 for a, b in zip(plain.default_value, want)):
+            plain.default_value = want
+        return
+
+
+def _studio_image(props, tex_name):
+    if not tex_name:
+        return None
+    existing = bpy.data.images.get("Roblox " + tex_name)
+    if existing is not None:
+        return existing
+    data = _get(props, "/blender/file?kind=tex&name=" + tex_name, 10)
+    path = os.path.join(tempfile.gettempdir(), "roblox_mesh_tools_in_" + tex_name)
+    with open(path, "wb") as f:
+        f.write(data)
+    img = bpy.data.images.load(path)
+    img.name = "Roblox " + tex_name
+    img.pack()
+    return img
+
+
+def _poll_studio():
+    try:
+        scene = bpy.context.scene
+        props = scene.roblox_mesh_tools
+    except Exception:
+        return 2.0
+    if not props.receive:
+        return 2.0
+    try:
+        data = json.loads(_get(props, "/blender/incoming", 0.5).decode("utf-8"))
+    except Exception:
+        return 3.0                       # app closed: check less often
+    events = data.get("events") or []
+    if not events:
+        # just had something (you're dragging in Studio): keep checking fast for a bit
+        return 0.15 if time.time() - _state.get("last_in", 0) < 5 else 1.0
+    _state["last_in"] = time.time()
+    _state["busy"] = True
+    _state["quiet_until"] = time.time() + 1.5   # our own changes aren't edits to send back
+    try:
+        for ev in events:
+            try:
+                apply_studio_event(ev, props)
+            except Exception as e:
+                _state["status"] = "Problem with %s from Studio - %s" % (ev.get("name"), e)
+    finally:
+        _state["busy"] = False
+        _state["quiet_until"] = time.time() + 1.5
+    _redraw()
+    return 0.15
+
+
+class RMT_OT_import(bpy.types.Operator):
+    bl_idname = "roblox_mesh_tools.import_mesh"
+    bl_label = "Roblox Mesh (.mesh)"
+    bl_description = "Import a Roblox .mesh file (any version, with bones)"
+    filter_glob: bpy.props.StringProperty(default="*.mesh", options={"HIDDEN"})
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    files: bpy.props.CollectionProperty(type=bpy.types.OperatorFileListElement)
+    directory: bpy.props.StringProperty(subtype="DIR_PATH")
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        props = context.scene.roblox_mesh_tools
+        paths = [os.path.join(self.directory, f.name) for f in self.files if f.name] or [self.filepath]
+        n = 0
+        for path in paths:
+            try:
+                with open(path, "rb") as f:
+                    mesh = read_mesh(f.read())
+                build_object(os.path.splitext(os.path.basename(path))[0], mesh, props, look=None)
+                n += 1
+            except Exception as e:
+                self.report({"ERROR"}, "%s: %s" % (os.path.basename(path), e))
+        self.report({"INFO"}, "Imported %d .mesh file(s)" % n)
+        return {"FINISHED"}
+
+
+def _menu_import(self, context):
+    self.layout.operator(RMT_OT_import.bl_idname, text="Roblox Mesh (.mesh)")
+
+
 # ------------------------------------------------------------------ UI
 class RMT_Props(bpy.types.PropertyGroup):
     studs_per_meter: bpy.props.FloatProperty(
@@ -774,6 +1473,9 @@ class RMT_Props(bpy.types.PropertyGroup):
         name="Wait", default=1.0, min=0.2, max=10.0, subtype="TIME", unit="TIME",
         description="How long the mesh has to stop changing before it resends (poses go right away)")
     port: bpy.props.IntProperty(name="Port", default=47820, min=1, max=65535)
+    receive: bpy.props.BoolProperty(
+        name="Receive from Studio", default=True,
+        description="Parts sent with 'Send to Blender' in Studio show up here, and stay linked both ways")
 
 
 class RMT_OT_send(bpy.types.Operator):
@@ -864,6 +1566,7 @@ class RMT_PT_panel(bpy.types.Panel):
         if props.live:
             self.layout.label(text="Live updates objects you've sent once", icon="INFO")
 
+        self.layout.prop(props, "receive", icon="IMPORT")
         box = self.layout.box()
         box.label(text=_state["status"])
         if _state["connected"] is False:
@@ -900,7 +1603,7 @@ class RMT_PT_options(bpy.types.Panel):
         col.prop(props, "port")
 
 
-CLASSES = (RMT_Props, RMT_OT_send, RMT_OT_pose, RMT_OT_unlink, RMT_PT_panel, RMT_PT_options)
+CLASSES = (RMT_Props, RMT_OT_send, RMT_OT_pose, RMT_OT_unlink, RMT_OT_import, RMT_PT_panel, RMT_PT_options)
 
 
 def register():
@@ -911,6 +1614,9 @@ def register():
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph)
     if _on_frame not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_on_frame)
+    bpy.types.TOPBAR_MT_file_import.append(_menu_import)
+    if not bpy.app.timers.is_registered(_poll_studio):
+        bpy.app.timers.register(_poll_studio, first_interval=2.0, persistent=True)
 
 
 @persistent
@@ -933,6 +1639,12 @@ def unregister():
         bpy.app.handlers.frame_change_post.remove(_on_frame)
     if bpy.app.timers.is_registered(_flush):
         bpy.app.timers.unregister(_flush)
+    if bpy.app.timers.is_registered(_poll_studio):
+        bpy.app.timers.unregister(_poll_studio)
+    try:
+        bpy.types.TOPBAR_MT_file_import.remove(_menu_import)
+    except Exception:
+        pass
     del bpy.types.Scene.roblox_mesh_tools
     for c in reversed(CLASSES):
         bpy.utils.unregister_class(c)
