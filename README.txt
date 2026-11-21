@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v7.0
+ROBLOX MESH TOOLS v7.1
 ======================
 
 What's in here
@@ -205,6 +205,9 @@ of the object's first material:
     leaves and hair show from behind like in Blender
   - New parts use SmoothPlastic (Roblox's Plastic adds a faint pattern) and
     full detail at any distance
+  Several materials with different pictures on one object: a MeshPart holds
+  one picture, so each material becomes its own part ("Name (Material)").
+  Pictures are sent as you see them in Blender - painted-but-unsaved ones too.
   If you add your own SurfaceAppearance in Studio, it's left alone.
   Colours look different? Blender shows colours through a "View Transform"
   (AgX or Filmic by default) that Roblox doesn't use. To compare fairly:

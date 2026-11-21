@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 10, 0),
+    "version": (1, 11, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -121,7 +121,7 @@ def _bone_order(arm):
 
 
 # ------------------------------------------------------------------ mesh data
-def _read_mesh(obj, depsgraph, props, arm, want_tangents=False):
+def _read_mesh(obj, depsgraph, props, arm, want_tangents=False, mat_index=None):
     """Corner-level data in Blender world space (+ per-corner bone weights when skinned,
     + tangents for normal maps)."""
     src = obj.evaluated_get(depsgraph) if props.apply_modifiers else obj
@@ -133,6 +133,12 @@ def _read_mesh(obj, depsgraph, props, arm, want_tangents=False):
             raise RuntimeError("'%s' has no faces" % obj.name)
         tri_loops = np.empty(nt * 3, dtype=np.int32)
         me.loop_triangles.foreach_get("loops", tri_loops)
+        if mat_index is not None:
+            tm = np.empty(nt, dtype=np.int32)
+            me.loop_triangles.foreach_get("material_index", tm)
+            tri_loops = tri_loops.reshape(-1, 3)[tm == mat_index].ravel()
+            if len(tri_loops) == 0:
+                raise RuntimeError("'%s' has no faces with material %d" % (obj.name, mat_index))
         loop_verts = np.empty(len(me.loops), dtype=np.int32)
         me.loops.foreach_get("vertex_index", loop_verts)
         co = np.empty(len(me.vertices) * 3, dtype=np.float32)
@@ -219,7 +225,7 @@ def _skin_table(weights, bone_index, fallback):
     return idx, wts, over
 
 
-def build_mesh(obj, depsgraph, props, normal_map=False):
+def build_mesh(obj, depsgraph, props, normal_map=False, mat_index=None):
     """Returns (bytes, info). info: center, size, verts, tris, bones (or None), over4."""
     arm = find_armature(obj) if props.send_bones else None
     if arm is not None:
@@ -228,12 +234,12 @@ def build_mesh(obj, depsgraph, props, normal_map=False):
         arm.data.pose_position = "REST"
         bpy.context.view_layer.update()
         try:
-            pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, bpy.context.evaluated_depsgraph_get(), props, arm, True)
+            pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, bpy.context.evaluated_depsgraph_get(), props, arm, True, mat_index)
         finally:
             arm.data.pose_position = old
             bpy.context.view_layer.update()
     else:
-        pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, depsgraph, props, None, normal_map)
+        pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, depsgraph, props, None, normal_map, mat_index)
 
     ax = _axis_matrix(props)
     pos = (pos @ ax.T) * props.studs_per_meter
@@ -477,11 +483,14 @@ def send_pose(obj, props):
     info = _state["sent"].get(key) if key else None
     if not info or not info.get("bones"):
         return False
-    t = pose_transforms(obj, info)
-    if t is None:
-        return False
-    res = _post(props, "/blender/pose", {"key": key, "t": t})
-    return bool(res.get("ok"))
+    ok = False
+    for pk, pinfo in (info.get("pieces") or [(key, info)]):
+        t = pose_transforms(obj, pinfo)
+        if t is None:
+            continue
+        res = _post(props, "/blender/pose", {"key": pk, "t": t})
+        ok = ok or bool(res.get("ok"))
+    return ok
 
 
 # ------------------------------------------------------------------ material
@@ -521,10 +530,43 @@ def _overlay_colour(base):
     return [_to_srgb(c) for c in plain.default_value[:3]]
 
 
+def _png_from_pixels(img):
+    """The image's own pixels as a PNG (no view transform, includes unsaved painting)."""
+    import zlib
+    w, h = img.size
+    if w == 0 or h == 0:
+        return None
+    px = np.empty(w * h * img.channels, dtype=np.float32)
+    img.pixels.foreach_get(px)
+    px = px.reshape(h, w, img.channels)
+    if img.channels == 3:
+        px = np.concatenate([px, np.ones((h, w, 1), dtype=np.float32)], axis=2)
+    elif img.channels < 3:
+        g = px[:, :, :1]
+        a = px[:, :, 1:2] if img.channels == 2 else np.ones((h, w, 1), dtype=np.float32)
+        px = np.concatenate([g, g, g, a], axis=2)
+    rgb = px[:, :, :3]
+    if img.is_float and img.colorspace_settings.name not in ("sRGB", "Non-Color"):
+        # float images hold linear colour: store sRGB like a normal picture
+        rgb = np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * np.power(np.clip(rgb, 0, None), 1 / 2.4) - 0.055)
+    px = np.concatenate([rgb, px[:, :, 3:4]], axis=2)
+    b = (np.clip(px, 0, 1) * 255 + 0.5).astype(np.uint8)[::-1]          # Blender stores rows bottom-up
+    raw = b"".join(b"\x00" + row.tobytes() for row in b)
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
 def _image_bytes(img):
     """(bytes, ext) of a Blender image as PNG/JPG."""
     if img is None:
         return None, None
+    if img.is_dirty and img.has_data:
+        data = _png_from_pixels(img)            # painted in Blender and not saved yet
+        if data:
+            return data, ".png"
     if img.packed_file is not None:
         data = bytes(img.packed_file.data)
         if data[:2] == b"\xff\xd8":
@@ -536,7 +578,11 @@ def _image_bytes(img):
     if img.packed_file is None and ext in (".png", ".jpg", ".jpeg") and os.path.isfile(path):
         with open(path, "rb") as f:
             return f.read(), (".jpg" if ext == ".jpeg" else ext)
-    # anything else (generated, painted, .tga, .exr ...) -> save a PNG copy
+    # anything else (generated, .tga, .exr ...) -> its own pixels as a PNG
+    if img.size[0] > 0:
+        data = _png_from_pixels(img)
+        if data:
+            return data, ".png"
     if not img.has_data and img.size[0] == 0:
         return None, None
     tmp = os.path.join(tempfile.gettempdir(), "roblox_mesh_tools_tex_%s.png" % hashlib.sha1(img.name.encode()).hexdigest()[:8])
@@ -556,15 +602,16 @@ def _to_srgb(c):
     return c * 12.92 if c <= 0.0031308 else 1.055 * (c ** (1 / 2.4)) - 0.055
 
 
-def get_material(obj):
+def get_material(obj, mat=False):
     """What Roblox can show of the object's first material:
     maps (color / normal / roughness / metalness images), see-through, plain colour, both sides."""
     out = {"maps": {}, "alpha": False, "tint": None, "double": True}
-    mat = None
-    for slot in obj.material_slots:
-        if slot.material is not None:
-            mat = slot.material
-            break
+    if mat is False:                 # the object's first material
+        mat = None
+        for slot in obj.material_slots:
+            if slot.material is not None:
+                mat = slot.material
+                break
     if mat is None:
         return out
     out["double"] = not getattr(mat, "use_backface_culling", False)
@@ -608,13 +655,60 @@ def get_material(obj):
 
 
 # ------------------------------------------------------------------ sending
+def _material_pieces(obj, props):
+    """{material index: look} when the object's materials need their own parts in Studio
+    (a MeshPart holds one picture), else None."""
+    if not props.send_texture or len(obj.material_slots) < 2:
+        return None
+    used = sorted({p.material_index for p in obj.data.polygons})
+    if len(used) < 2:
+        return None
+    looks = {}
+    for i in used:
+        mat = obj.material_slots[i].material if i < len(obj.material_slots) else None
+        looks[i] = get_material(obj, mat)
+    def sig(lk):
+        img = lk["maps"].get("color")
+        return (img.name if img else None, tuple(lk["tint"] or ()), lk.get("look"), lk["alpha"])
+    if len({sig(lk) for lk in looks.values()}) < 2:
+        return None                           # they all look the same: one part is fine
+    return looks
+
+
 def send_object(obj, props, depsgraph):
-    look = get_material(obj) if props.send_texture else {"maps": {}, "alpha": False, "tint": None, "double": True}
-    data, info = build_mesh(obj, depsgraph, props, normal_map="normal" in look["maps"])
     key = obj.get(KEY_PROP)
     if not key:
         key = hashlib.sha1(("%s|%f" % (obj.name, time.time())).encode()).hexdigest()[:16]
         obj[KEY_PROP] = key
+    pieces = _material_pieces(obj, props)
+    if not pieces:
+        return _send_piece(obj, props, depsgraph, key, obj.name, None, None)
+    # one Studio part per material, each with its own picture
+    total = None
+    sent = []
+    for i, look in pieces.items():
+        mat = obj.material_slots[i].material
+        pk = key + "%02x" % i
+        info = _send_piece(obj, props, depsgraph, pk, "%s (%s)" % (obj.name, mat.name if mat else i), i, look)
+        sent.append((pk, info))
+        if total is None:
+            total = dict(info)
+        else:
+            total["tris"] += info["tris"]
+    for k in ("roblox_sent_id", "roblox_sent_center", "roblox_sent_size", "roblox_sent_matrix"):
+        if k in obj:
+            del obj[k]                         # Studio has several parts for it: no single one to follow
+    skinned = [(pk, inf) for pk, inf in sent if inf.get("bones")]
+    if skinned:
+        _state["sent"][key] = dict(skinned[0][1], pieces=skinned)
+    total["pieces"] = len(sent)
+    return total
+
+
+def _send_piece(obj, props, depsgraph, key, name, mat_index, look):
+    if look is None:
+        look = get_material(obj) if props.send_texture else {"maps": {}, "alpha": False, "tint": None, "double": True}
+    data, info = build_mesh(obj, depsgraph, props, normal_map="normal" in look["maps"], mat_index=mat_index)
 
     # pictures: each one is only sent if Mesh Downloader doesn't have it yet
     maps, blobs = [], {}
@@ -627,7 +721,7 @@ def send_object(obj, props, depsgraph):
 
     off = _offset(props)
     info["center"] = [float(c) + float(o) for c, o in zip(info["center"], off)]
-    meta = {"key": key, "name": obj.name, "center": info["center"], "size": info["size"],
+    meta = {"key": key, "name": name, "center": info["center"], "size": info["size"],
             "maps": maps, "alpha": look["alpha"], "double": look["double"]}
     if look["tint"] is not None:
         meta["tint"] = look["tint"]
@@ -653,13 +747,22 @@ def send_object(obj, props, depsgraph):
         res = _post(props, "/blender/mesh", meta, data)
     if not res.get("ok"):
         raise RuntimeError(str(res.get("error") or "Mesh Downloader said no"))
-    if res.get("id"):
+    if res.get("id") and mat_index is None:
         target = _move_target(obj)
         obj["roblox_sent_id"] = str(res["id"])
         obj["roblox_sent_center"] = [float(c) for c in info["center"]]
         obj["roblox_sent_size"] = [float(c) for c in info["size"]]
         obj["roblox_sent_matrix"] = [float(x) for row in target.matrix_world for x in row]
 
+    if mat_index is not None:
+        if info.get("bones"):
+            try:
+                t = pose_transforms(obj, info)
+                if t is not None:
+                    _post(props, "/blender/pose", {"key": key, "t": t})
+            except Exception:
+                pass
+        return info
     if info.get("bones"):
         _state["sent"][key] = info
         try:
@@ -679,6 +782,8 @@ def _send_many(objs, props, depsgraph):
                 obj.update_from_editmode()
             info = send_object(obj, props, depsgraph)
             extra = ", %d bones" % len(info["bones"]) if info.get("bones") else ""
+            if info.get("pieces"):
+                extra += ", %d parts (one per material)" % info["pieces"]
             sent.append("%s (%d tris%s)" % (obj.name, info["tris"], extra))
             if info.get("over4"):
                 notes.append("%s: %d vertices had more than 4 bones - kept the strongest 4" % (obj.name, info["over4"]))
