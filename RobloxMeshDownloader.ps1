@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.6'
+$AppVersion = '6.7'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1458,6 +1458,7 @@ function Start-Batch {
         $r = Get-AssetBytes $e.Id $key $retries $delay
         if (-not $r.Ok) {
             Log ("[{0}] FAILED: {1}" -f $e.Id, $r.Error)
+            $script:failedIds[[string]$e.Id] = [string]$r.Error
             $fail++; $putBack.Add($e.Raw); continue
         }
         if (Save-Asset $e $r.Bytes $root) { $ok++ } else { $fail++; $putBack.Add($e.Raw) }
@@ -1520,6 +1521,7 @@ $script:uploads = @{}
 $script:blenderEvents = New-Object System.Collections.Generic.List[object]
 $script:toBlender = New-Object System.Collections.Generic.List[object]       # Studio -> Blender, ready
 $script:toBlenderWait = New-Object System.Collections.Generic.List[object]   # waiting for a download
+$script:failedIds = @{}   # mesh id -> why its last download failed
 $script:blenderTex = @{}        # texture hash -> file name in library\textures
 $script:blenderHist = @{}       # object key -> mesh ids sent this session (newest last)
 $script:blenderLog = @{}        # object key -> last time we logged it
@@ -1713,6 +1715,7 @@ function Receive-ToBlender($ctx) {
         $script:toBlenderWait.Add(@{ part = $p; since = (Get-Date) })
         $wait++
         $mid = [string]$p.meshId
+        $script:failedIds.Remove($mid)
         if (-not (Test-Path -LiteralPath (Join-Path $LibDir "$mid.mesh"))) { $lines.Add($mid) }
         if ([string]$p.textureId -match '^\d{5,}$' -and -not (Get-TextureMap)[[string]$p.textureId]) { [void]$script:texQueue.Add([string]$p.textureId) }
     }
@@ -1726,8 +1729,15 @@ function Receive-ToBlender($ctx) {
 function Check-ToBlenderWait {
     for ($i = $script:toBlenderWait.Count - 1; $i -ge 0; $i--) {
         $w = $script:toBlenderWait[$i]
-        $ev = Resolve-ToBlender $w.part (-not $script:busy -and -not $script:autoStartPending)
+        $idle = -not $script:busy -and -not $script:autoStartPending
+        $ev = Resolve-ToBlender $w.part $idle
         if ($ev) { Queue-ToBlender $ev; $script:toBlenderWait.RemoveAt($i) }
+        elseif ($idle -and $script:failedIds.ContainsKey([string]$w.part.meshId)) {
+            $why = $script:failedIds[[string]$w.part.meshId]
+            if ($why -match 'not approved') { $why = 'Roblox won''t hand it out (it''s pending or failed moderation, or was taken down)' }
+            Log ("Can't send '{0}' to Blender: its mesh {1} couldn't be downloaded - {2}. Try Send Rig to Blender + an .obj instead." -f [string]$w.part.name, [string]$w.part.meshId, $why)
+            $script:toBlenderWait.RemoveAt($i)
+        }
         elseif (((Get-Date) - $w.since).TotalMinutes -gt 10) { $script:toBlenderWait.RemoveAt($i) }
     }
 }
@@ -2125,6 +2135,7 @@ $timer.Add_Tick({
     if ($script:tickCount -eq 4) { Check-Updates }
     if ($script:tickCount % 400 -eq 0 -and -not $script:busy) { Sync-Studio -Quiet }
     if ($script:tickCount % 10 -eq 0 -and -not $script:busy) { Watch-Inbox }
+    if ($script:toBlenderWait.Count -gt 0 -and -not $script:busy) { Check-ToBlenderWait }
     if ($script:autoStartPending -and -not $script:busy) { Run-Queue }
 })
 
