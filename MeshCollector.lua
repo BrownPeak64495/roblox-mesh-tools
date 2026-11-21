@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "7.5" -- keep in sync with version.json
+local PLUGIN_VERSION = "7.6" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1473,10 +1473,11 @@ local function applyLocalLook(p, look)
 		pcall(function()
 			p.TextureID = path(color)
 		end)
-		if look.alpha and p.Transparency < 0.01 then
+		if look.alpha and p.Transparency < 0.02 then
 			-- a MeshPart only blends its picture's see-through spots when it's a little transparent
-			-- (fully opaque, it shows the hidden colour there instead)
-			p.Transparency = 0.01
+			-- (fully opaque, it shows the hidden colour there instead). Tested: it needs a bit
+			-- over 0.011, so 0.02 to be safe
+			p.Transparency = 0.02
 		end
 	end
 	if not color and type(look.tint) == "table" then
