@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '7.3'
+$AppVersion = '7.4'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1654,13 +1654,13 @@ function Receive-BlenderMesh($ctx) {
         $ev.color = @([double]$m.color[0], [double]$m.color[1], [double]$m.color[2])
     }
     $script:blenderEvents.Add($ev)
-    Send-Json $ctx @{ ok = $true; id = $id }
+    Send-Json $ctx @{ ok = $true; id = $id; texture = $tex }
 
     $now = Get-Date
     $last = $script:blenderLog[$key]
     if (-not $last -or ($now - $last).TotalSeconds -ge 15) {
         $script:blenderLog[$key] = $now
-        Log ("Blender: got '{0}' ({1}), waiting for Studio to pick it up." -f $name, (Format-Size $bytes.Length))
+        Log ("Blender: got '{0}' ({1}, {2}), waiting for Studio to pick it up." -f $name, (Format-Size $bytes.Length), $(if ($tex) { "texture $tex" } else { 'no texture' }))
     }
 }
 $script:modelBytesCache = @{ key = $null; bytes = $null }

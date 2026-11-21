@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "7.3" -- keep in sync with version.json
+local PLUGIN_VERSION = "7.4" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -6777,7 +6777,9 @@ end)
 				if S.blenderSelect then
 					Selection:Set({ p })
 				end
-				print(string.format("[Mesh Tools] Blender: added %s (local mesh, nothing uploaded)", p.Name))
+				local tex = type(ev.maps) == "table" and ev.maps.color or nil
+				print(string.format("[Mesh Tools] Blender: added %s (local mesh, nothing uploaded) - %s", p.Name,
+					tex and ("texture " .. tostring(tex) .. " -> TextureID " .. textureOf(p)) or "no texture came with it"))
 				if ins and ins.widget.Enabled and refreshInserter then
 					task.defer(refreshInserter)
 				end

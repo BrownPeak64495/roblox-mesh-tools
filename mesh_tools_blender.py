@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 12, 0),
+    "version": (1, 13, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -797,6 +797,12 @@ def _send_piece(obj, props, depsgraph, key, name, mat_index, look):
     if look is None:
         look = get_material(obj) if props.send_texture else {"maps": {}, "alpha": False, "tint": None, "double": True}
     uv_spec = {"name": look.get("uv"), "mapping": look.get("uv_mapping")}
+    if not props.send_texture:
+        info_tex = "texture off (Options > Send material)"
+    elif "color" not in look["maps"]:
+        info_tex = "no texture (no Image Texture plugged into Base Color)"
+    else:
+        info_tex = None
     data, info = build_mesh(obj, depsgraph, props, normal_map="normal" in look["maps"], mat_index=mat_index, uv_spec=uv_spec)
     if look.get("uv_problem"):
         info["uv_problem"] = look["uv_problem"]
@@ -805,6 +811,8 @@ def _send_piece(obj, props, depsgraph, key, name, mat_index, look):
     maps, blobs = [], {}
     for kind, img in look["maps"].items():
         b, ext = _image_bytes(img)
+        if not b and kind == "color":
+            info_tex = "no texture (its picture file is missing: %s)" % (img.filepath or img.name)
         if b:
             h = hashlib.sha1(b).hexdigest()[:20]
             maps.append({"kind": kind, "hash": h, "ext": ext})
@@ -838,6 +846,7 @@ def _send_piece(obj, props, depsgraph, key, name, mat_index, look):
         res = _post(props, "/blender/mesh", meta, data)
     if not res.get("ok"):
         raise RuntimeError(str(res.get("error") or "Mesh Downloader said no"))
+    info["texture"] = info_tex or ("texture " + str(res.get("texture"))) if res.get("texture") else (info_tex or "texture sent")
     if res.get("id") and mat_index is None:
         target = _move_target(obj)
         obj["roblox_sent_id"] = str(res["id"])
@@ -875,6 +884,8 @@ def _send_many(objs, props, depsgraph):
             extra = ", %d bones" % len(info["bones"]) if info.get("bones") else ""
             if info.get("pieces"):
                 extra += ", %d parts (one per material)" % info["pieces"]
+            if info.get("texture") and not str(info["texture"]).startswith("texture "):
+                extra += ", " + str(info["texture"])
             if info.get("uv_problem"):
                 notes.append("%s: %s - it may look different in Studio" % (obj.name, info["uv_problem"]))
             sent.append("%s (%d tris%s)" % (obj.name, info["tris"], extra))
