@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.5" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.6" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -6008,6 +6008,126 @@ end)
 			print(msg .. ". Turn on 'Receive from Studio' in Blender's Roblox panel if nothing shows up.")
 		end
 	end
+
+	-- "Send Rig to Blender": only the skeleton (Motor6D joints + Bones) of the selected
+	-- model, as a Blender armature. Works when the meshes are gone - in Blender, put the
+	-- shapes back with "Attach meshes to rig".
+	local function rigOf(model)
+		local bones, partBone, names = {}, {}, {}
+		local function add(name, pos, parent, part)
+			local rec = { n = name, p = parent or -1, pos = { pos.X, pos.Y, pos.Z } }
+			if part then
+				rec.part = part.Name
+				rec.pcf = { part.CFrame:GetComponents() }
+				rec.size = { part.Size.X, part.Size.Y, part.Size.Z }
+			end
+			table.insert(bones, rec)
+			names[name] = #bones - 1
+			return #bones - 1
+		end
+		local motors, parts = {}, {}
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("Motor6D") and d.Part0 and d.Part1 then
+				table.insert(motors, d)
+			elseif d:IsA("BasePart") then
+				table.insert(parts, d)
+			end
+		end
+		local isChild = {}
+		for _, m in ipairs(motors) do
+			isChild[m.Part1] = true
+		end
+		local root = (model:IsA("Model") and model.PrimaryPart) or model:FindFirstChild("HumanoidRootPart")
+		if not (root and root:IsA("BasePart")) then
+			root = nil
+			for _, m in ipairs(motors) do
+				if not isChild[m.Part0] then
+					root = m.Part0
+					break
+				end
+			end
+		end
+		root = root or parts[1]
+		if not root then
+			return nil
+		end
+		partBone[root] = add(root.Name, root.Position, -1, root)
+		-- joints, parents first
+		local left = #motors
+		while left > 0 do
+			local progress = false
+			for _, m in ipairs(motors) do
+				if partBone[m.Part0] and not partBone[m.Part1] then
+					local joint = (m.Part0.CFrame * m.C0).Position
+					partBone[m.Part1] = add(m.Part1.Name, joint, partBone[m.Part0], m.Part1)
+					left = left - 1
+					progress = true
+				end
+			end
+			if not progress then
+				break
+			end
+		end
+		-- parts with no joint still get a bone (so their mesh has something to follow)
+		for _, pt in ipairs(parts) do
+			if not partBone[pt] and not names[pt.Name] then
+				partBone[pt] = add(pt.Name, pt.Position, partBone[root], pt)
+			end
+		end
+		-- Bones (skinned rigs). One named like a part is the same joint: skipped.
+		local boneIndex = {}
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("Bone") and not names[d.Name] then
+				local parent = d.Parent
+				local pi = nil
+				if parent and parent:IsA("Bone") then
+					pi = boneIndex[parent]
+				end
+				if not pi then
+					local host = d:FindFirstAncestorWhichIsA("BasePart")
+					pi = (host and partBone[host]) or partBone[root]
+				end
+				boneIndex[d] = add(d.Name, d.WorldPosition, pi, nil)
+			elseif d:IsA("Bone") then
+				boneIndex[d] = names[d.Name]
+			end
+		end
+		return bones
+	end
+
+	local rigButton = toolbar:CreateButton("Send Rig to Blender", "Send only the skeleton (joints + Bones) of the selected model to Blender - works even when its meshes are missing", "")
+	rigButton.ClickableWhenViewportHidden = true
+	rigButton.Click:Connect(function()
+		rigButton:SetActive(false)
+		local ok, err = pcall(function()
+			local list = {}
+			for _, sel in ipairs(Selection:Get()) do
+				local model = sel:IsA("BasePart") and (sel:FindFirstAncestorWhichIsA("Model") or sel) or sel
+				local bones = rigOf(model)
+				if bones and #bones > 0 then
+					local key = model:GetAttribute("BlenderRigKey")
+					if type(key) ~= "string" then
+						key = string.lower((string.gsub(HttpService:GenerateGUID(false), "%W", "")))
+						model:SetAttribute("BlenderRigKey", key)
+					end
+					table.insert(list, { type = "rig", key = key, name = model.Name, bones = bones })
+				end
+			end
+			if #list == 0 then
+				warn("[Mesh Tools] Send Rig to Blender: select a rig (a model with Motor6Ds or Bones) first.")
+				return
+			end
+			local d = post(list, false)
+			if not d then
+				warn("[Mesh Tools] Send Rig to Blender: open Mesh Downloader first.")
+			else
+				print(string.format("[Mesh Tools] Sent %d rig(s) to Blender (%d bones).", #list, #list[1].bones))
+			end
+		end)
+		if not ok then
+			warn("[Mesh Tools] Send Rig to Blender: " .. tostring(err))
+		end
+	end)
 
 	local sendButton = toolbar:CreateButton("Send to Blender", "Send the selected mesh parts to Blender - they stay linked both ways", "")
 	sendButton.ClickableWhenViewportHidden = true

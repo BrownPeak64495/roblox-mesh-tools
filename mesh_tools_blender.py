@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 6, 0),
+    "version": (1, 7, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -1272,8 +1272,78 @@ def _remove_object(o):
         bpy.data.objects.remove(rig, do_unlink=True)
 
 
+def _rbx_point(p, props):
+    ax = _axis_matrix(props)
+    return np.array(p, dtype=np.float64) @ ax / props.studs_per_meter
+
+
+def build_rig(ev, props):
+    """A skeleton from Studio (Motor6D joints + Bones) as an armature. Meshes come later
+    (Attach meshes to rig)."""
+    key = str(ev.get("key") or "")
+    bones = ev.get("bones") or []
+    name = str(ev.get("name") or "Roblox rig")
+    old = next((o for o in bpy.data.objects if o.type == "ARMATURE" and o.get("roblox_rig_from_studio") == key), None)
+    if old is not None:
+        arm_data = old.data
+        rig = old
+    else:
+        arm_data = bpy.data.armatures.new(name)
+        rig = bpy.data.objects.new(name, arm_data)
+        bpy.context.scene.collection.objects.link(rig)
+    rig["roblox_rig_from_studio"] = key
+    rig["roblox_rig_key"] = key                 # meshes on it share one skeleton in Studio
+    heads = [_rbx_point(b["pos"], props) for b in bones]
+    parts = {}
+    ax = _axis_matrix(props)
+    for b in bones:
+        if b.get("part") and b.get("pcf"):
+            parts[b["n"]] = {"part": b["part"],
+                             "center": _rbx_point(b["pcf"][0:3], props).tolist(),
+                             "size": (np.abs(np.array(b.get("size") or [1, 1, 1], dtype=np.float64)) / props.studs_per_meter).tolist()}
+    rig["roblox_parts"] = json.dumps(parts)
+    skin = len(bones) > len(parts)
+    rig["roblox_has_skin_bones"] = skin
+
+    prev = bpy.context.view_layer.objects.active
+    for o in bpy.context.view_layer.objects:
+        o.select_set(False)
+    bpy.context.view_layer.objects.active = rig
+    bpy.ops.object.mode_set(mode="EDIT")
+    for eb in list(arm_data.edit_bones):
+        arm_data.edit_bones.remove(eb)
+    made = []
+    for i, b in enumerate(bones):
+        eb = arm_data.edit_bones.new(b["n"] or ("Bone%d" % i))
+        head = heads[i]
+        kids = [j for j, c in enumerate(bones) if c["p"] == i and np.linalg.norm(heads[j] - head) > 1e-4]
+        if kids:
+            tail = heads[kids[0]] if len(kids) == 1 else np.mean([heads[j] for j in kids], axis=0)
+        elif b["n"] in parts:
+            c = np.array(parts[b["n"]]["center"])
+            tail = c + (c - head) if np.linalg.norm(c - head) > 1e-3 else head + np.array([0, 0, max(parts[b["n"]]["size"]) * 0.5])
+        else:
+            tail = head + np.array([0, 0, 0.1 / max(props.studs_per_meter, 1e-6) * 3])
+        if np.linalg.norm(tail - head) < 1e-4:
+            tail = head + np.array([0, 0, 0.05])
+        eb.head = head.tolist()
+        eb.tail = tail.tolist()
+        made.append(eb)
+    for i, b in enumerate(bones):
+        if 0 <= b["p"] < len(made) and b["p"] != i:
+            made[i].parent = made[b["p"]]
+    bpy.ops.object.mode_set(mode="OBJECT")
+    rig.show_in_front = True
+    bpy.context.view_layer.objects.active = prev if prev is not None else rig
+    _state["status"] = "From Studio: rig %s (%d bones) - select its meshes + the rig > Attach meshes to rig" % (name, len(bones))
+    return rig
+
+
 def apply_studio_event(ev, props):
     """A part sent from Studio: make it (or update the linked object)."""
+    if ev.get("type") == "rig":
+        build_rig(ev, props)
+        return
     key = str(ev.get("key") or "")
     mesh_id = str(ev.get("meshId") or "")
     if not key or not mesh_id:
@@ -1418,6 +1488,140 @@ def _poll_studio():
         _state["quiet_until"] = time.time() + 1.5
     _redraw()
     return 0.15
+
+
+def _norm_name(n):
+    import re
+    n = re.sub(r"\.\d{3}$", "", n.lower())
+    n = re.sub(r"(_?mesh|_?part|_?geo|_?obj)$", "", n)
+    return re.sub(r"[^a-z0-9]", "", n)
+
+
+def _fit_similarity(src, dst):
+    """Scale, rotation, move that best put src points on dst (Umeyama). -> 4x4, rms error"""
+    src = np.asarray(src, dtype=np.float64)
+    dst = np.asarray(dst, dtype=np.float64)
+    ms, md = src.mean(0), dst.mean(0)
+    a, b = src - ms, dst - md
+    cov = b.T @ a / len(src)
+    u, d, vt = np.linalg.svd(cov)
+    sgn = np.eye(3)
+    if np.linalg.det(u) * np.linalg.det(vt) < 0:
+        sgn[2, 2] = -1
+    r = u @ sgn @ vt
+    var = (a ** 2).sum() / len(src)
+    scale = float(np.trace(np.diag(d) @ sgn) / var) if var > 1e-12 else 1.0
+    t = md - scale * r @ ms
+    m = np.eye(4)
+    m[:3, :3] = scale * r
+    m[:3, 3] = t
+    fitted = (scale * (r @ src.T)).T + t
+    return m, float(np.sqrt(((fitted - dst) ** 2).sum(1).mean()))
+
+
+def _world_center(o):
+    import mathutils
+    pts = [o.matrix_world @ mathutils.Vector(c) for c in o.bound_box]
+    lo = np.min([p[:] for p in pts], axis=0)
+    hi = np.max([p[:] for p in pts], axis=0)
+    return (lo + hi) / 2.0
+
+
+class RMT_OT_attach(bpy.types.Operator):
+    bl_idname = "roblox_mesh_tools.attach"
+    bl_label = "Attach meshes to rig"
+    bl_description = ("Put the selected meshes on the active armature: lines them up with the rig's parts "
+                      "(by name), then binds each piece to its bone, or bends it smoothly")
+    bl_options = {"REGISTER", "UNDO"}
+    mode: bpy.props.EnumProperty(
+        name="How", default="AUTO",
+        items=[("AUTO", "Automatic", "Pieces named like a part follow that bone; the rest bend smoothly if the rig has Bones, else follow the nearest part"),
+               ("STIFF", "Stiff pieces", "Each piece follows one bone (blocky R15-style parts)"),
+               ("SMOOTH", "Smooth", "Blender's automatic weights (one body that bends)")])
+    line_up: bpy.props.BoolProperty(name="Line up with the rig", default=True,
+                                    description="Move / turn / scale the meshes so the pieces sit on the rig's parts (needs 3+ pieces named like parts)")
+
+    @classmethod
+    def poll(cls, context):
+        a = context.active_object
+        return a is not None and a.type == "ARMATURE" and any(o.type == "MESH" for o in context.selected_objects)
+
+    def execute(self, context):
+        import mathutils
+        rig = context.active_object
+        meshes = [o for o in context.selected_objects if o.type == "MESH"]
+        parts = json.loads(rig.get("roblox_parts") or "{}")
+        bone_names = {b.name for b in rig.data.bones}
+        by_norm = {}
+        for bone, info in parts.items():
+            by_norm[_norm_name(info["part"])] = bone
+        for bn in bone_names:
+            by_norm.setdefault(_norm_name(bn), bn)
+        match = {}
+        for o in meshes:
+            n = _norm_name(o.name)
+            if n in by_norm:
+                match[o] = by_norm[n]
+            elif o.data.name and _norm_name(o.data.name) in by_norm:
+                match[o] = by_norm[_norm_name(o.data.name)]
+
+        note = ""
+        pairs = [(o, b) for o, b in match.items() if b in parts]
+        if self.line_up and len(pairs) >= 3:
+            m, err = _fit_similarity([_world_center(o) for o, _ in pairs], [parts[b]["center"] for _, b in pairs])
+            size = max(np.linalg.norm(np.array(parts[b]["center"]) - np.array(parts[pairs[0][1]]["center"])) for _, b in pairs) or 1.0
+            mm = mathutils.Matrix(m.tolist())
+            for o in meshes:
+                if o.parent is None or o.parent not in meshes:
+                    o.matrix_world = mm @ o.matrix_world
+            note = " | lined up (%d pieces, off by %.0f%%)" % (len(pairs), 100 * err / size)
+            if err / size > 0.15:
+                note += " - check it, the names may not match the parts"
+        elif self.line_up:
+            note = " | not lined up (needs 3+ pieces named like the rig's parts)"
+
+        smooth_rig = bool(rig.get("roblox_has_skin_bones"))
+        centers = {b: np.array(i["center"]) for b, i in parts.items()}
+        stiff_n = smooth_n = 0
+        for o in meshes:
+            for md in [md for md in o.modifiers if md.type == "ARMATURE"]:
+                o.modifiers.remove(md)
+            bone = match.get(o)
+            mode = self.mode
+            if mode == "AUTO":
+                mode = "STIFF" if (bone or not smooth_rig) else "SMOOTH"
+            if mode == "STIFF":
+                if bone is None and centers:
+                    c = _world_center(o)
+                    bone = min(centers, key=lambda b: np.linalg.norm(centers[b] - c))
+                if bone is None:
+                    mode = "SMOOTH"
+            mw = o.matrix_world.copy()
+            if mode == "STIFF":
+                o.vertex_groups.clear()
+                g = o.vertex_groups.new(name=bone)
+                g.add(list(range(len(o.data.vertices))), 1.0, "REPLACE")
+                md = o.modifiers.new("Armature", "ARMATURE")
+                md.object = rig
+                o.parent = rig
+                o.matrix_world = mw
+                stiff_n += 1
+            else:
+                for x in context.view_layer.objects:
+                    x.select_set(False)
+                o.select_set(True)
+                rig.select_set(True)
+                context.view_layer.objects.active = rig
+                bpy.ops.object.parent_set(type="ARMATURE_AUTO")
+                smooth_n += 1
+        for o in meshes:
+            o.select_set(True)
+        rig.select_set(True)
+        context.view_layer.objects.active = rig
+        msg = "Attached %d piece(s) stiff, %d smooth%s" % (stiff_n, smooth_n, note)
+        _state["status"] = msg
+        self.report({"INFO"}, msg)
+        return {"FINISHED"}
 
 
 class RMT_OT_import(bpy.types.Operator):
@@ -1574,6 +1778,9 @@ class RMT_PT_panel(bpy.types.Panel):
             self.layout.label(text="Live updates objects you've sent once", icon="INFO")
 
         self.layout.prop(props, "receive", icon="IMPORT")
+        act = context.active_object
+        if act is not None and act.type == "ARMATURE":
+            self.layout.operator("roblox_mesh_tools.attach", icon="ARMATURE_DATA")
         box = self.layout.box()
         box.label(text=_state["status"])
         if _state["connected"] is False:
@@ -1610,7 +1817,7 @@ class RMT_PT_options(bpy.types.Panel):
         col.prop(props, "port")
 
 
-CLASSES = (RMT_Props, RMT_OT_send, RMT_OT_pose, RMT_OT_unlink, RMT_OT_import, RMT_PT_panel, RMT_PT_options)
+CLASSES = (RMT_Props, RMT_OT_send, RMT_OT_pose, RMT_OT_unlink, RMT_OT_import, RMT_OT_attach, RMT_PT_panel, RMT_PT_options)
 
 
 def register():

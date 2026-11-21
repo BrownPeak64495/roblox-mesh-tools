@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.5'
+$AppVersion = '6.6'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1666,6 +1666,10 @@ $script:tickCount = 0
 # ---------------- Studio -> Blender ----------------
 # A part from Studio, ready once its mesh (and picture) are in the library. $null if still missing.
 function Resolve-ToBlender($p, [bool]$noWait = $false) {
+    if ([string]$p.type -eq 'rig') {
+        # skeleton only: nothing to download
+        return @{ type = 'rig'; key = [string]$p.key; name = (Clean-Field ([string]$p.name)); bones = @($p.bones) }
+    }
     $id = [string]$p.meshId
     if ($id -notmatch '^\d{5,}$') { return $null }
     if (-not (Test-Path -LiteralPath (Join-Path $LibDir "$id.mesh"))) { return $null }
@@ -1739,7 +1743,7 @@ function Send-Bytes($ctx, [byte[]]$bytes, [string]$type) {
 
 function Send-Json($ctx, $obj, [int]$code = 200) {
     try {
-        $json = $obj | ConvertTo-Json -Compress -Depth 8
+        $json = $obj | ConvertTo-Json -Compress -Depth 10
         $bytes = [Text.Encoding]::UTF8.GetBytes($json)
         $ctx.Response.StatusCode = $code
         $ctx.Response.ContentType = 'application/json'

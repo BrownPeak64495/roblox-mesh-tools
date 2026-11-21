@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v6.5
+ROBLOX MESH TOOLS v6.6
 ======================
 
 What's in here
@@ -242,6 +242,19 @@ STUDIO -> BLENDER (and keeping both in sync)
   Meshes that aren't downloaded yet are downloaded first (needs your API
   key). Blender can also open .mesh files directly: File > Import >
   Roblox Mesh (.mesh) - any version, Draco-compressed ones too.
+  RIG WITHOUT ITS MESHES (e.g. an .rbxm whose meshes are gone) + the shapes
+  from somewhere else (an .obj):
+    1. Studio: insert the .rbxm, select the model > toolbar "Send Rig to
+       Blender". Blender gets an armature: one bone per part (from its
+       Motor6D joints) plus any Bones.
+    2. Blender: File > Import > Wavefront (.obj).
+    3. Select all the .obj pieces, then Shift+click the rig last.
+    4. Roblox panel > "Attach meshes to rig". It lines the pieces up with the
+       rig's parts (by name - so keep the .obj names like Head, UpperTorso;
+       any size / facing is fixed for you) and binds each piece to its bone.
+       Press F9 right after for options: Stiff pieces / Smooth (one body
+       that bends) / turn off lining up.
+    5. Pose the rig to check, then select the pieces > Send to Studio.
   Once you've changed a part in Blender, Studio's undo won't rebuild it in
   Blender from the older mesh - send it again from Blender instead.
 
