@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v6.8
+ROBLOX MESH TOOLS v6.9
 ======================
 
 What's in here
@@ -219,6 +219,16 @@ the armature, with ONE set of Bones (in one of the parts) that every part is
 skinned to - so they bend together and the joints between them stay closed.
 Tip: give the vertices along each seam the same weights in both meshes.
 (Settings > Blender > "Meshes on one armature share one skeleton".)
+
+UPDATES ARRIVE BY THEMSELVES:
+  - Mesh Downloader checks for a new version when it opens and every few
+    minutes while it's open (not while downloading or sending to Blender),
+    then updates and restarts itself.
+  - The Blender add-on (1.9+) updates itself from Mesh Downloader within a
+    minute - no reinstalling.
+  - Studio: turn on File > Studio Settings > "Reload plugins on file
+    changed" once. Then the new plugin loads by itself; otherwise restart
+    Studio when the banner says so.
 
 --------------------------------------------------
 STUDIO -> BLENDER (and keeping both in sync)

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 8, 0),
+    "version": (1, 9, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -1602,6 +1602,46 @@ def _studio_image(props, tex_name):
     return img
 
 
+def _self_update(props):
+    """Mesh Downloader keeps the newest add-on; when it's newer than this one, swap and reload."""
+    import re
+    try:
+        data = _get(props, "/blender/addon", 2.0)
+    except Exception:
+        return
+    m = re.search(rb'"version":\s*\((\d+),\s*(\d+),\s*(\d+)\)', data)
+    if not m:
+        return
+    new = tuple(int(x) for x in m.groups())
+    if new <= tuple(bl_info["version"]):
+        return
+    path = os.path.abspath(__file__)
+    try:
+        compile(data, path, "exec")                       # never install a broken file
+        with open(path + ".new", "wb") as f:
+            f.write(data)
+        os.replace(path + ".new", path)
+        try:
+            import importlib.util
+            os.remove(importlib.util.cache_from_source(path))   # a same-size file in the same second would load the old copy
+        except Exception:
+            pass
+    except Exception as e:
+        _state["status"] = "Couldn't update the add-on: %s" % e
+        return
+    name = __name__
+    _state["status"] = "Add-on updated to %d.%d.%d" % new
+
+    def _reload():
+        try:
+            bpy.ops.preferences.addon_disable(module=name)
+            bpy.ops.preferences.addon_enable(module=name)
+        except Exception as e:
+            print("Roblox Mesh Tools: reload after update failed - restart Blender (%s)" % e)
+        return None
+    bpy.app.timers.register(_reload, first_interval=0.2)
+
+
 def _poll_studio():
     try:
         scene = bpy.context.scene
@@ -1614,6 +1654,9 @@ def _poll_studio():
         data = json.loads(_get(props, "/blender/incoming", 0.5).decode("utf-8"))
     except Exception:
         return 3.0                       # app closed: check less often
+    if time.time() - _state.get("update_check", 0) > 60 and time.time() - _state.get("last_in", 0) > 30:
+        _state["update_check"] = time.time()
+        _self_update(props)
     events = data.get("events") or []
     if not events:
         # just had something (you're dragging in Studio): keep checking fast for a bit

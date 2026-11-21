@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.8'
+$AppVersion = '6.9'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1122,7 +1122,7 @@ function Set-WindowIcon {
 
 # Update source = a web folder holding version.json + the tool files.
 # version.json: { "version": "3.1", "files": ["RobloxMeshDownloader.ps1", "MeshCollector.lua", ...] }
-function Check-Updates([switch]$Manual) {
+function Check-Updates([switch]$Manual, [switch]$Quiet) {
     $url = $UpdateBox.Text.Trim().TrimEnd('/')
     if (-not $url) {
         if ($Manual) { Log 'No update source set yet - see README (Automatic updates).' }
@@ -1175,7 +1175,7 @@ function Check-Updates([switch]$Manual) {
     } catch {
         $ex = $_.Exception
         while ($ex.InnerException) { $ex = $ex.InnerException }
-        Log ("Update check failed: {0}" -f $ex.Message)
+        if (-not $Quiet) { Log ("Update check failed: {0}" -f $ex.Message) }
     }
 }
 
@@ -1522,6 +1522,7 @@ $script:blenderEvents = New-Object System.Collections.Generic.List[object]
 $script:toBlender = New-Object System.Collections.Generic.List[object]       # Studio -> Blender, ready
 $script:toBlenderWait = New-Object System.Collections.Generic.List[object]   # waiting for a download
 $script:failedIds = @{}   # mesh id -> why its last download failed
+$script:lastActive = [DateTime]::MinValue   # last time something was sent between Studio and Blender
 $script:blenderTex = @{}        # texture hash -> file name in library\textures
 $script:blenderHist = @{}       # object key -> mesh ids sent this session (newest last)
 $script:blenderLog = @{}        # object key -> last time we logged it
@@ -1862,6 +1863,14 @@ function Handle-Request($ctx) {
             Log ("Studio asked for {0} mesh(es): {1} ready, {2} not downloaded." -f ($installed.Count + $missing.Count), $installed.Count, $missing.Count)
             return
         }
+        if ($path -match '^/(blender/(mesh|texture|pose)|toblender)$') { $script:lastActive = Get-Date }
+        if ($path -eq '/blender/addon') {
+            # the Blender add-on updates itself from here
+            $f = Join-Path $PSScriptRoot 'mesh_tools_blender.py'
+            if (-not (Test-Path -LiteralPath $f)) { Send-Json $ctx @{ ok = $false; error = 'not found' } 404; return }
+            Send-Bytes $ctx ([IO.File]::ReadAllBytes($f)) 'text/plain'
+            return
+        }
         if ($path -eq '/blender/mesh' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderMesh $ctx; return }
         if ($path -eq '/blender/texture' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderTexture $ctx; return }
         if ($path -eq '/blender/pose' -and $ctx.Request.HttpMethod -eq 'POST') { Receive-BlenderPose $ctx; return }
@@ -2168,6 +2177,8 @@ $timer.Add_Tick({
     # Every ~60 seconds, re-copy meshes in case Studio updated (updates wipe its content folder).
     $script:tickCount++
     if ($script:tickCount -eq 4) { Check-Updates }
+    # and every ~3 minutes while it's open - but never in the middle of downloads or a Blender session
+    if ($script:tickCount % 1200 -eq 0 -and -not $script:busy -and ((Get-Date) - $script:lastActive).TotalSeconds -gt 30) { Check-Updates -Quiet }
     if ($script:tickCount % 400 -eq 0 -and -not $script:busy) { Sync-Studio -Quiet }
     if ($script:tickCount % 10 -eq 0 -and -not $script:busy) { Watch-Inbox }
     if ($script:toBlenderWait.Count -gt 0 -and -not $script:busy) { Check-ToBlenderWait }

@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.8" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.9" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -1921,7 +1921,7 @@ local function checkForUpdate()
 	end
 	if latest and versionNewer(latest, PLUGIN_VERSION) then
 		if appVersion and not versionNewer(latest, appVersion) then
-			setBanner(string.format("Mesh Tools v%s is installed - restart Studio to load it (this is v%s).", latest, PLUGIN_VERSION))
+			setBanner(string.format("Mesh Tools v%s is installed - restart Studio to load it (this is v%s). Tip: Studio Settings > Reload plugins on file changed = on, and updates load by themselves.", latest, PLUGIN_VERSION))
 		else
 			setBanner(string.format(
 				"Update available: v%s (you have v%s). Open Mesh Downloader - it updates itself and this plugin - then restart Studio.",
