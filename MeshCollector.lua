@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.7" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.8" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -2434,7 +2434,7 @@ local function makeThumb(list, o)
 	local note = text({ Size = UDim2.fromScale(1, 1), TextXAlignment = Enum.TextXAlignment.Center, TextWrapped = true, Text = "...", ZIndex = 3 }, 10, "regular", "dim")
 	note.Parent = vp
 	local t = {
-		vp = vp, cam = cam, world = world, note = note, loader = o.loader, title = o.title, actions = o.actions,
+		vp = vp, cam = cam, world = world, note = note, loader = o.loader, title = o.title, actions = o.actions, onOpen = o.onOpen,
 		ctx = entry.ctx, list = list, state = "idle", radius = 1, yaw = math.random() * math.pi * 2, pitch = 0.35,
 		zoom = 1, hovering = false, dragging = false, hoverToken = 0, moved = 0, last = nil,
 	}
@@ -2444,7 +2444,7 @@ local function makeThumb(list, o)
 		local tok = t.hoverToken
 		if S.hoverExpand then
 			task.delay(S.hoverDelay / 10, function()
-				if t.hovering and tok == t.hoverToken and t.holder then
+				if t.hovering and tok == t.hoverToken and t.holder and not t.onOpen then
 					openPop(t.ctx, t)
 				end
 			end)
@@ -2465,7 +2465,9 @@ local function makeThumb(list, o)
 	vp.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			t.dragging = false
-			if t.moved <= 4 and t.holder then
+			if t.moved <= 4 and t.onOpen then
+				t.onOpen() -- Inserter: opens in place, in the window
+			elseif t.moved <= 4 and t.holder then
 				openPop(t.ctx, t) -- click = open the big view
 			end
 		end
@@ -2634,7 +2636,7 @@ card = function(container, list, order, o)
 		c.Size = UDim2.new(1, 0, 0, listRowHeight())
 	end
 
-	local t = makeThumb(list, { loader = o.loader, title = o.title, actions = o.actions })
+	local t = makeThumb(list, { loader = o.loader, title = o.title, actions = o.actions, onOpen = o.onOpen })
 	corner(0.75).Parent = t.vp
 	t.vp.Parent = c
 
@@ -3592,7 +3594,7 @@ pivotSeg.Position = UDim2.fromOffset(106, 0)
 pivotSeg.Size = UDim2.new(1, -106, 1, 0)
 pivotSeg.Parent = pivotRow
 pivotRow.Parent = insPage
-dimText("Click a preview for the big view. Drag a card into the 3D view to place it.", 3, 10).Parent = insPage
+dimText("Click a preview to open it here (pick parts, rename, delete). Drag a card into the 3D view to place it.", 3, 10).Parent = insPage
 
 local insList = scrollList(4)
 insList.Parent = insPage
@@ -3660,6 +3662,7 @@ local sectionOpen = { models = true, meshes = true }
 local expanded = {}
 local modelCache = {}
 local meshTemplates = {}
+local meshViews = {} -- mesh id -> { roots, parts } for the in-window view
 local selected = nil
 local selectToken = 0
 local insCards = {} -- item/part table -> card
@@ -3785,7 +3788,7 @@ local function getMeshTemplate(m)
 end
 
 local function scanModelParts(roots)
-	local parts, partCount = {}, 0
+	local parts, partCount, meshCount = {}, 0, 0
 	for _, r in ipairs(roots) do
 		local all = r:GetDescendants()
 		table.insert(all, 1, r)
@@ -3801,19 +3804,27 @@ local function scanModelParts(roots)
 						meshId = sm.MeshId
 					end
 				end
-				if meshId and meshId ~= "" then
-					local path = d.Name
-					local p = d.Parent
-					while p and p ~= r.Parent do
-						path = p.Name .. "/" .. path
-						p = p.Parent
-					end
-					table.insert(parts, { inst = d, name = d.Name, id = idFrom(meshId) or "?", path = path })
+				local isMesh = meshId and meshId ~= ""
+				if isMesh then
+					meshCount = meshCount + 1
 				end
+				local path = d.Name
+				local p = d.Parent
+				while p and p ~= r.Parent do
+					path = p.Name .. "/" .. path
+					p = p.Parent
+				end
+				table.insert(parts, {
+					inst = d,
+					name = d.Name,
+					id = isMesh and (idFrom(meshId) or "?") or "",
+					mesh = isMesh and true or false,
+					path = path,
+				})
 			end
 		end
 	end
-	return parts, partCount
+	return parts, partCount, meshCount
 end
 
 local function loadModel(m, callback)
@@ -3863,7 +3874,7 @@ local function loadModel(m, callback)
 					entry.err = "Couldn't open this model: " .. tostring(err)
 				else
 					entry.roots = roots
-					entry.parts, entry.partCount = scanModelParts(roots)
+					entry.parts, entry.partCount, entry.meshCount = scanModelParts(roots)
 				end
 			end
 		end
@@ -3923,7 +3934,7 @@ local function showModelInfo(m, entry)
 	if entry and entry.err then
 		extra = entry.err
 	elseif entry and entry.roots then
-		extra = string.format("%d object(s) at top  -  %d parts  -  %d meshes", #entry.roots, entry.partCount or 0, #(entry.parts or {}))
+		extra = string.format("%d object(s) at top  -  %d parts  -  %d meshes", #entry.roots, entry.partCount or 0, entry.meshCount or 0)
 	end
 	setInfo(string.format(
 		"<b>%s</b>\nModel  -  %s  -  %s  -  %s\nFolder: %s\n%s",
@@ -3937,13 +3948,17 @@ local function showModelInfo(m, entry)
 end
 
 local function showPartInfo(m, p)
+	if type(p) == "table" and p[1] then
+		setInfo(string.format("<b>%d parts</b> picked in %s", #p, escapeRich(m.name)))
+		return
+	end
 	local inst = p.inst
 	local size = inst.Size
 	setInfo(string.format(
-		"<b>%s</b>\nPart in %s  -  mesh ID %s\n%s\nSize %.2f x %.2f x %.2f studs  -  %s",
+		"<b>%s</b>\nPart in %s  -  %s\n%s\nSize %.2f x %.2f x %.2f studs  -  %s",
 		escapeRich(p.name),
 		escapeRich(m.name),
-		escapeRich(p.id),
+		p.mesh and ("mesh ID " .. escapeRich(p.id)) or "no mesh (plain part)",
 		escapeRich(p.path),
 		size.X,
 		size.Y,
@@ -4001,6 +4016,20 @@ local function selectPart(m, p)
 	inspectorHighlight(p)
 end
 
+-- several parts (Shift+click / box select). One part = a normal part pick.
+local function selectParts(m, list)
+	if #list == 0 then
+		return selectModel(m)
+	elseif #list == 1 then
+		return selectPart(m, list[1])
+	end
+	selectToken = selectToken + 1
+	selected = { kind = "parts", item = m, parts = list }
+	showPartInfo(m, list)
+	updateInsHighlights()
+	inspectorHighlight(list)
+end
+
 local function matches(str, filter)
 	if filter == "" then
 		return true
@@ -4011,28 +4040,114 @@ end
 local startCardDrag -- forward (drag into the 3D view)
 local insertTarget -- forward
 
-local function buildInspector(m, cache, order, grow, filter)
+-- these are filled in further down (Inserting section)
+local renameItem, deleteItem
+local insScale = {} -- model key -> scale to insert at (nil = as saved)
+
+-- The model's own scale when it was saved (Model:GetScale), or nil
+local function savedScale(cache)
+	local r = cache and cache.roots and cache.roots[1]
+	if r and r:IsA("Model") then
+		local ok, sc = pcall(function()
+			return r:GetScale()
+		end)
+		if ok and type(sc) == "number" then
+			return sc
+		end
+	end
+	return nil
+end
+
+-- kind = "model" or "mesh". A mesh opens the same way, as a one-part model.
+local function buildInspector(m, cache, order, grow, filter, kind)
+	kind = kind or "model"
 	local H = S.inspectHeight
 	local frame = new("Frame", { Size = UDim2.new(1, 0, 0, H), LayoutOrder = order, ClipsDescendants = true }, { corner(1) })
 	bind(frame, "BackgroundColor3", "panel")
 	stroke("accent").Parent = frame
+	local function whole()
+		if kind == "mesh" then
+			selectMesh(m)
+		else
+			selectModel(m)
+		end
+	end
 
-	-- header: name, Insert model, close
-	text({ Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -160, 0, 20), Text = m.name, TextTruncate = Enum.TextTruncate.AtEnd }, 13, "bold", "text").Parent = frame
-	local insertModelBtn = button("Insert model", "primary")
-	insertModelBtn.Size = UDim2.fromOffset(104, 24)
-	insertModelBtn.Position = UDim2.new(1, -142, 0, 5)
+	-- header: name (click to rename), Insert, delete, close
+	local nameBox = new("TextBox", {
+		Position = UDim2.fromOffset(10, 6),
+		Size = UDim2.new(1, -196, 0, 22),
+		BackgroundTransparency = 1,
+		ClearTextOnFocus = false,
+		Text = tostring(m.name),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+	})
+	bindText(nameBox, 13, "bold")
+	bind(nameBox, "TextColor3", "text")
+	local nameLine = new("Frame", { AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 0, 1, 0), Size = UDim2.new(0, 0, 0, 1), BorderSizePixel = 0 })
+	bind(nameLine, "BackgroundColor3", "accent")
+	nameLine.Parent = nameBox
+	nameBox.Focused:Connect(function()
+		tween(nameLine, { Size = UDim2.new(1, 0, 0, 1) })
+	end)
+	nameBox.FocusLost:Connect(function()
+		tween(nameLine, { Size = UDim2.new(0, 0, 0, 1) })
+		local want = clean(nameBox.Text)
+		if want ~= "" and want ~= m.name then
+			renameItem(kind, m, want)
+		else
+			nameBox.Text = tostring(m.name)
+		end
+	end)
+	nameBox.Parent = frame
+	local insertModelBtn = button(kind == "mesh" and "Insert" or "Insert model", "primary")
+	insertModelBtn.Size = UDim2.fromOffset(kind == "mesh" and 70 or 104, 24)
+	insertModelBtn.Position = UDim2.new(1, kind == "mesh" and -178 or -178, 0, 5)
+	if kind == "mesh" then
+		insertModelBtn.Position = UDim2.new(1, -144, 0, 5)
+	end
 	insertModelBtn.Parent = frame
+	local trashBtn = button("🗑", "secondary")
+	trashBtn.Size = UDim2.fromOffset(30, 24)
+	trashBtn.Position = UDim2.new(1, -70, 0, 5)
+	trashBtn.Parent = frame
 	local closeBtn = button("X", "secondary")
 	closeBtn.Size = UDim2.fromOffset(30, 24)
-	closeBtn.Position = UDim2.new(1, -35, 0, 5)
+	closeBtn.Position = UDim2.new(1, -36, 0, 5)
 	closeBtn.Parent = frame
 	insertModelBtn.MouseButton1Click:Connect(function()
-		insertTarget({ kind = "model", item = m })
+		insertTarget({ kind = kind, item = m, scale = insScale[m.key] })
 	end)
 	closeBtn.MouseButton1Click:Connect(function()
 		expanded = {}
 		renderInserter()
+	end)
+	-- delete: first click asks, second deletes (to the Recycle Bin)
+	local armed = false
+	trashBtn.MouseButton1Click:Connect(function()
+		if not armed then
+			armed = true
+			trashBtn.Text = "Sure?"
+			trashBtn.Size = UDim2.fromOffset(58, 24)
+			trashBtn.Position = UDim2.new(1, -98, 0, 5)
+			trashBtn.BackgroundColor3 = RED
+			setInsStatus(kind == "mesh"
+				and "Click Sure? to delete this mesh (to the Recycle Bin). Parts using it go blank after Studio restarts."
+				or "Click Sure? to delete this model file (to the Recycle Bin).", RED)
+			task.delay(4, function()
+				if armed and trashBtn.Parent then
+					armed = false
+					trashBtn.Text = "🗑"
+					trashBtn.Size = UDim2.fromOffset(30, 24)
+					trashBtn.Position = UDim2.new(1, -70, 0, 5)
+					trashBtn.BackgroundColor3 = T("card")
+				end
+			end)
+			return
+		end
+		armed = false
+		deleteItem(kind, m)
 	end)
 
 	if grow then
@@ -4059,27 +4174,70 @@ local function buildInspector(m, cache, order, grow, filter)
 	vp.Parent = body
 	local hover = text({ Position = UDim2.fromOffset(8, 6), Size = UDim2.new(1, -16, 0, 16), Text = "", ZIndex = 6, TextTruncate = Enum.TextTruncate.AtEnd }, 11, "bold", "text")
 	hover.Parent = vp
-	text({ Position = UDim2.new(0, 8, 1, -20), Size = UDim2.new(1, -16, 0, 16), Text = "Click a part  -  drag to rotate  -  scroll to zoom", ZIndex = 6, TextTruncate = Enum.TextTruncate.AtEnd }, 10, "regular", "dim").Parent = vp
+	text({ Position = UDim2.new(0, 8, 1, -20), Size = UDim2.new(1, -16, 0, 16), Text = "Click / drag a box to pick (Shift adds)  -  right-drag to turn  -  scroll to zoom", ZIndex = 6, TextTruncate = Enum.TextTruncate.AtEnd }, 10, "regular", "dim").Parent = vp
+	local box = new("Frame", { Visible = false, ZIndex = 7, BackgroundTransparency = 0.85, BorderSizePixel = 0 })
+	bind(box, "BackgroundColor3", "accent")
+	stroke("accent").Parent = box
+	box.Parent = vp
 
-	-- side panel
+	-- side panel: info, scale (models), insert picked, part list
 	local side = new("Frame", { Position = UDim2.new(0.62, 3, 0, 0), Size = UDim2.new(0.38, -3, 1, 0), BackgroundTransparency = 1 })
 	side.Parent = body
-	local infoBox = new("Frame", { Size = UDim2.new(1, 0, 0, 78) }, { corner(1), padding(6, 8, 6, 8) })
+	local y = 0
+	local infoBox = new("Frame", { Size = UDim2.new(1, 0, 0, 84) }, { corner(1), padding(6, 8, 6, 8) })
 	bind(infoBox, "BackgroundColor3", "card")
 	infoBox.Parent = side
 	local partName = text({ Size = UDim2.new(1, 0, 0, 16), Text = "", TextTruncate = Enum.TextTruncate.AtEnd }, 12, "bold", "text")
 	partName.Parent = infoBox
 	local partInfo = text({ Position = UDim2.fromOffset(0, 18), Size = UDim2.new(1, 0, 1, -18), Text = "", TextWrapped = true, TextYAlignment = Enum.TextYAlignment.Top, TextTruncate = Enum.TextTruncate.AtEnd }, 10, "regular", "dim")
 	partInfo.Parent = infoBox
+	y = 90
+
+	-- model scale: what it was saved at; type another to insert at that size (1 = normal)
+	local saved = kind == "model" and savedScale(cache) or nil
+	local scaleBox = nil
+	if saved then
+		local row = new("Frame", { Position = UDim2.fromOffset(0, y), Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1 })
+		row.Parent = side
+		text({ Size = UDim2.new(0, 46, 1, 0), Text = "Scale" }, 11, "bold", "dim").Parent = row
+		local holder_, box_ = textInput("", 1, string.format("%g", insScale[m.key] or saved))
+		holder_.Position = UDim2.fromOffset(46, 0)
+		holder_.Size = UDim2.new(1, -112, 1, 0)
+		holder_.Parent = row
+		scaleBox = box_
+		local back = button("Reset", "secondary")
+		back.Size = UDim2.fromOffset(62, 24)
+		back.Position = UDim2.new(1, -62, 0, 0)
+		back.Parent = row
+		local function setScale(v)
+			if v and math.abs(v - saved) > 1e-6 then
+				insScale[m.key] = v
+			else
+				insScale[m.key] = nil
+			end
+			box_.Text = string.format("%g", insScale[m.key] or saved)
+		end
+		box_.FocusLost:Connect(function()
+			local v = tonumber(box_.Text)
+			setScale(v and v > 0 and math.clamp(v, 0.01, 100) or nil)
+		end)
+		back.MouseButton1Click:Connect(function()
+			setScale(nil) -- back to how it was saved
+		end)
+		y = y + 30
+	end
+
 	local insertPartBtn = button("Insert part", "primary")
 	insertPartBtn.Size = UDim2.new(1, 0, 0, 26)
-	insertPartBtn.Position = UDim2.fromOffset(0, 84)
+	insertPartBtn.Position = UDim2.fromOffset(0, y)
 	insertPartBtn.Parent = side
-	local listLabel = text({ Position = UDim2.fromOffset(2, 116), Size = UDim2.new(1, -4, 0, 14), Text = "" }, 10, "bold", "dim")
+	y = y + 32
+	local listLabel = text({ Position = UDim2.fromOffset(2, y), Size = UDim2.new(1, -4, 0, 14), Text = "" }, 10, "bold", "dim")
 	listLabel.Parent = side
+	y = y + 16
 	local partList = new("ScrollingFrame", {
-		Position = UDim2.fromOffset(0, 132),
-		Size = UDim2.new(1, 0, 1, -132),
+		Position = UDim2.fromOffset(0, y),
+		Size = UDim2.new(1, 0, 1, -y),
 		CanvasSize = UDim2.new(0, 0, 0, 0),
 		AutomaticCanvasSize = Enum.AutomaticSize.Y,
 		ScrollBarThickness = 4,
@@ -4128,8 +4286,8 @@ local function buildInspector(m, cache, order, grow, filter)
 	frameContent(insp, holder)
 	holder.Parent = world
 
-	-- outline: the picked part drawn again on top, plus 8 accent-coloured copies nudged
-	-- 2px around it. ViewportFrames can't show Highlights, so this is how it gets an edge.
+	-- outline: the picked parts drawn again on top, plus 8 accent-coloured copies nudged
+	-- 2px around them. ViewportFrames can't show Highlights, so this is how they get an edge.
 	local outline = nil
 	local function clearOutline()
 		if outline then
@@ -4139,20 +4297,13 @@ local function buildInspector(m, cache, order, grow, filter)
 			outline = nil
 		end
 	end
-	local function buildOutline(cl)
+	local function buildOutline(list)
 		clearOutline()
-		if not cl or not (S.inspectMode == "outline" or S.inspectOutline) then
+		if #list == 0 or not (S.inspectMode == "outline" or S.inspectOutline) then
 			return
 		end
 		outline = {}
 		local function overlay(dx, dy, sil)
-			local copy = nil
-			pcall(function()
-				copy = cl:Clone()
-			end)
-			if not copy then
-				return
-			end
 			local ov = Instance.new("ViewportFrame")
 			ov.BackgroundTransparency = 1
 			ov.Size = UDim2.new(1, 0, 1, 0)
@@ -4167,29 +4318,48 @@ local function buildInspector(m, cache, order, grow, filter)
 			c2.CFrame = cam.CFrame
 			c2.Parent = ov
 			ov.CurrentCamera = c2
-			if sil then
-				for _, ch in ipairs(copy:GetDescendants()) do
-					if ch:IsA("SurfaceAppearance") or ch:IsA("Decal") or ch:IsA("Texture") then
-						ch:Destroy()
-					end
+			for n, cl in ipairs(list) do
+				if n > 40 then
+					break -- plenty for an edge; keeps big picks fast
 				end
+				local copy = nil
 				pcall(function()
-					copy.TextureID = ""
+					copy = cl:Clone()
 				end)
-				copy.Color = WHITE
-				copy.Material = Enum.Material.SmoothPlastic
-				copy.Reflectance = 0
-				copy.Transparency = 0
+				if copy then
+					for _, ch in ipairs(copy:GetChildren()) do
+						if ch:IsA("BasePart") then
+							ch:Destroy() -- child parts are drawn on their own
+						end
+					end
+					if sil then
+						for _, ch in ipairs(copy:GetDescendants()) do
+							if ch:IsA("SurfaceAppearance") or ch:IsA("Decal") or ch:IsA("Texture") then
+								ch:Destroy()
+							end
+						end
+						pcall(function()
+							copy.TextureID = ""
+						end)
+						copy.Color = WHITE
+						copy.Material = Enum.Material.SmoothPlastic
+						copy.Reflectance = 0
+						copy.Transparency = 0
+					else
+						copy.Transparency = baseT[cl] or 0
+					end
+					copy.Parent = ov
+				end
+			end
+			if sil then
 				ov.Ambient = WHITE
 				ov.LightColor = rgb(0, 0, 0)
 				ov.ImageColor3 = T("accent")
 			else
-				copy.Transparency = baseT[cl] or 0
 				ov.Ambient = vp.Ambient
 				ov.LightColor = vp.LightColor
 				ov.LightDirection = vp.LightDirection
 			end
-			copy.Parent = ov
 			ov.Parent = vp
 			table.insert(outline, { vp = ov, cam = c2, sil = sil })
 		end
@@ -4211,11 +4381,53 @@ local function buildInspector(m, cache, order, grow, filter)
 	end
 	orbit()
 
-	-- side list of the model's meshes
+	-- side list: every part (meshes and plain parts like default limbs)
 	local rows = {}
 	local function paintRow(row, on)
 		row.BackgroundColor3 = on and T("accent") or T("card")
 		row.TextColor3 = on and T("accentText") or T("text")
+	end
+	local picked = {} -- list of part entries
+	local pickedSet = {}
+	local function shiftDown(input)
+		local ok, v = pcall(function()
+			return input:IsModifierKeyDown(Enum.ModifierKey.Shift)
+		end)
+		if ok and v then
+			return true
+		end
+		local ok2, v2 = pcall(function()
+			local uis = game:GetService("UserInputService")
+			return uis:IsKeyDown(Enum.KeyCode.LeftShift) or uis:IsKeyDown(Enum.KeyCode.RightShift)
+				or uis:IsKeyDown(Enum.KeyCode.LeftControl) or uis:IsKeyDown(Enum.KeyCode.RightControl)
+		end)
+		return ok2 and v2 or false
+	end
+	local function choose(list, add)
+		local out = {}
+		if add then
+			local seen = {}
+			for _, p in ipairs(picked) do
+				table.insert(out, p)
+				seen[p] = true
+			end
+			for _, p in ipairs(list) do
+				if seen[p] and #list == 1 then
+					-- Shift+click on a picked part: un-pick it
+					for i, q in ipairs(out) do
+						if q == p then
+							table.remove(out, i)
+							break
+						end
+					end
+				elseif not seen[p] then
+					table.insert(out, p)
+				end
+			end
+		else
+			out = list
+		end
+		selectParts(m, out)
 	end
 	local shown = 0
 	for i, p in ipairs(cache.parts or {}) do
@@ -4223,7 +4435,7 @@ local function buildInspector(m, cache, order, grow, filter)
 			shown = shown + 1
 			local row = new("TextButton", {
 				Size = UDim2.new(1, -6, 0, 22),
-				Text = "  " .. p.name,
+				Text = "  " .. p.name .. (p.mesh and "" or "  (part)"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				TextTruncate = Enum.TextTruncate.AtEnd,
 				AutoButtonColor = false,
@@ -4233,10 +4445,10 @@ local function buildInspector(m, cache, order, grow, filter)
 			paintRow(row, false)
 			row.Parent = partList
 			rows[p] = row
-			local downPos, dragged = nil, false
+			local downPos, dragged, shifted = nil, false, false
 			row.InputBegan:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 then
-					downPos, dragged = input.Position, false
+					downPos, dragged, shifted = input.Position, false, shiftDown(input)
 				end
 			end)
 			row.InputChanged:Connect(function(input)
@@ -4244,7 +4456,7 @@ local function buildInspector(m, cache, order, grow, filter)
 					local d = input.Position - downPos
 					if math.abs(d.X) + math.abs(d.Y) > 10 then
 						downPos, dragged = nil, true
-						startCardDrag(ins, row, { kind = "part", item = m, part = p }, p.name)
+						startCardDrag(ins, row, { kind = "part", item = m, part = p, scale = insScale[m.key] }, p.name)
 					end
 				end
 			end)
@@ -4258,39 +4470,73 @@ local function buildInspector(m, cache, order, grow, filter)
 					dragged = false
 					return
 				end
-				selectPart(m, p)
+				choose({ p }, shifted)
 			end)
 		end
 	end
-	listLabel.Text = string.format("MESHES (%d)  -  click to pick, drag to place", shown)
+	listLabel.Text = string.format("PARTS (%d)  -  click, Shift+click, drag to place", shown)
 
-	local picked = nil
-	local function pick(p)
-		picked = p
+	local function pick(sel)
+		-- sel: nil (whole model), one part entry, or a list of them
+		if sel and sel.inst then
+			sel = { sel }
+		end
+		picked = sel or {}
+		pickedSet = {}
+		for _, p in ipairs(picked) do
+			pickedSet[p.inst] = true
+		end
+		local any = #picked > 0
+		local cls = {}
 		for orig, cl in pairs(map) do
 			local base = baseT[cl] or 0
 			local target = base
-			if p and S.inspectMode ~= "outline" and orig ~= p.inst then
+			if any and S.inspectMode ~= "outline" and not pickedSet[orig] then
 				target = math.max(base, 0.88)
 			end
 			tween(cl, { Transparency = target }, 0.8)
+			if pickedSet[orig] then
+				table.insert(cls, cl)
+			end
 		end
-		buildOutline(p and map[p.inst] or nil)
-		if p then
+		buildOutline(cls)
+		if #picked == 1 then
+			local p = picked[1]
 			local sz = p.inst.Size
 			partName.Text = p.name
-			partInfo.Text = string.format("Mesh ID %s\n%.2f x %.2f x %.2f studs\n%s", p.id, sz.X, sz.Y, sz.Z, p.path)
+			partInfo.Text = string.format("%s\n%.2f x %.2f x %.2f studs\n%s", p.mesh and ("Mesh ID " .. p.id) or (p.inst.ClassName .. " - no mesh"), sz.X, sz.Y, sz.Z, p.path)
+			insertPartBtn.Text = "Insert part"
 			insertPartBtn.Visible = true
+		elseif #picked > 1 then
+			partName.Text = string.format("%d parts", #picked)
+			local names = {}
+			for k, p in ipairs(picked) do
+				if k > 6 then
+					table.insert(names, "...")
+					break
+				end
+				table.insert(names, p.name)
+			end
+			partInfo.Text = table.concat(names, ", ")
+			insertPartBtn.Text = string.format("Insert %d parts", #picked)
+			insertPartBtn.Visible = true
+		elseif kind == "mesh" then
+			local bones = tonumber(m.bones) or 0
+			partName.Text = "Mesh"
+			partInfo.Text = string.format("ID %s  -  %s\n%s tris%s\n%s studs  -  %s", tostring(m.id), tostring(m.version or "?"), tostring(m.tris or "?"),
+				bones ~= 0 and string.format("  -  %d bones", bones) or "", fmtSize(m.size), tostring(m.date or ""))
+			insertPartBtn.Visible = false
 		else
 			partName.Text = "Whole model"
-			partInfo.Text = string.format("%d parts  -  %d meshes\nPick a part in 3D or in the list.", cache.partCount or 0, #(cache.parts or {}))
+			partInfo.Text = string.format("%d parts  -  %d meshes\nPick parts in 3D or in the list.%s", cache.partCount or 0, cache.meshCount or 0,
+				saved and string.format("\nSaved at scale %g", saved) or "")
 			insertPartBtn.Visible = false
 		end
 		for pp, row in pairs(rows) do
-			paintRow(row, pp == p)
+			paintRow(row, pickedSet[pp.inst] == true)
 		end
 		-- only the side list scrolls to it - the window stays where it is
-		local row = p and rows[p]
+		local row = picked[1] and rows[picked[1]]
 		if row then
 			task.defer(function()
 				if not row.Parent then
@@ -4306,19 +4552,38 @@ local function buildInspector(m, cache, order, grow, filter)
 		end
 	end
 	insertPartBtn.MouseButton1Click:Connect(function()
-		if picked then
-			insertTarget({ kind = "part", item = m, part = picked })
+		if #picked == 1 then
+			insertTarget({ kind = "part", item = m, part = picked[1], scale = insScale[m.key] })
+		elseif #picked > 1 then
+			insertTarget({ kind = "parts", item = m, parts = picked, scale = insScale[m.key] })
 		end
 	end)
 
-	-- which mesh part is under the mouse (skips invisible parts like HumanoidRootPart)
-	local function partAt(pos)
+	-- screen ray / projection helpers
+	local function rayAt(pos)
 		local sz = vp.AbsoluteSize
 		local rx = (pos.X - vp.AbsolutePosition.X) / math.max(sz.X, 1)
 		local ry = (pos.Y - vp.AbsolutePosition.Y) / math.max(sz.Y, 1)
 		local tanY = math.tan(math.rad(cam.FieldOfView) / 2)
 		local aspect = sz.X / math.max(sz.Y, 1)
-		local dir = cam.CFrame:VectorToWorldSpace(Vector3.new((rx * 2 - 1) * tanY * aspect, (1 - ry * 2) * tanY, -1)).Unit
+		return cam.CFrame:VectorToWorldSpace(Vector3.new((rx * 2 - 1) * tanY * aspect, (1 - ry * 2) * tanY, -1)).Unit
+	end
+	local function toScreen(pos)
+		local sz = vp.AbsoluteSize
+		local l = cam.CFrame:PointToObjectSpace(pos)
+		if l.Z >= -1e-3 then
+			return nil
+		end
+		local tanY = math.tan(math.rad(cam.FieldOfView) / 2)
+		local aspect = sz.X / math.max(sz.Y, 1)
+		local sx = (l.X / -l.Z) / (tanY * aspect)
+		local sy = (l.Y / -l.Z) / tanY
+		return Vector2.new(vp.AbsolutePosition.X + (sx + 1) / 2 * sz.X, vp.AbsolutePosition.Y + (1 - sy) / 2 * sz.Y)
+	end
+
+	-- which part is under the mouse (skips invisible parts like HumanoidRootPart)
+	local function partAt(pos)
+		local dir = rayAt(pos)
 		local params = RaycastParams.new()
 		params.FilterType = Enum.RaycastFilterType.Exclude
 		local skip = {}
@@ -4337,13 +4602,32 @@ local function buildInspector(m, cache, order, grow, filter)
 		return nil
 	end
 
-	local dragging, moved, last = false, 0, nil
+	-- parts whose middle is inside the dragged box
+	local function partsInBox(a, b)
+		local lo = Vector2.new(math.min(a.X, b.X), math.min(a.Y, b.Y))
+		local hi = Vector2.new(math.max(a.X, b.X), math.max(a.Y, b.Y))
+		local out = {}
+		for _, p in ipairs(cache.parts or {}) do
+			local cl = map[p.inst]
+			if cl and (baseT[cl] or 0) < 0.95 then
+				local sp = toScreen(cl.Position)
+				if sp and sp.X >= lo.X and sp.X <= hi.X and sp.Y >= lo.Y and sp.Y <= hi.Y then
+					table.insert(out, p)
+				end
+			end
+		end
+		return out
+	end
+
+	local mode, moved, last, startPos, shifted = nil, 0, nil, nil, false
 	vp.MouseEnter:Connect(function()
 		insList.ScrollingEnabled = false -- scroll = zoom while over the 3D view
 	end)
 	vp.MouseLeave:Connect(function()
 		insList.ScrollingEnabled = true
-		dragging = false
+		if mode == "turn" then
+			mode = nil
+		end
 		hover.Text = ""
 	end)
 	frame.Destroying:Connect(function()
@@ -4351,18 +4635,27 @@ local function buildInspector(m, cache, order, grow, filter)
 	end)
 	vp.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging, moved, last = true, 0, input.Position
+			mode, moved, last, startPos, shifted = "pick", 0, input.Position, input.Position, shiftDown(input)
+		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+			mode, moved, last = "turn", 0, input.Position
 		end
 	end)
 	vp.InputChanged:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseMovement then
-			if dragging and last then
+			if mode and last then
 				local d = input.Position - last
 				last = input.Position
 				moved = moved + math.abs(d.X) + math.abs(d.Y)
-				insp.yaw = insp.yaw - d.X * 0.012
-				insp.pitch = math.clamp(insp.pitch + d.Y * 0.012, -1.45, 1.45)
-				orbit()
+				if mode == "turn" then
+					insp.yaw = insp.yaw - d.X * 0.012
+					insp.pitch = math.clamp(insp.pitch + d.Y * 0.012, -1.45, 1.45)
+					orbit()
+				elseif mode == "pick" and moved > 4 then
+					local a, b = startPos, input.Position
+					box.Visible = true
+					box.Position = UDim2.fromOffset(math.min(a.X, b.X) - vp.AbsolutePosition.X, math.min(a.Y, b.Y) - vp.AbsolutePosition.Y)
+					box.Size = UDim2.fromOffset(math.abs(a.X - b.X), math.abs(a.Y - b.Y))
+				end
 			else
 				local p = partAt(input.Position)
 				hover.Text = p and p.name or ""
@@ -4373,24 +4666,35 @@ local function buildInspector(m, cache, order, grow, filter)
 		end
 	end)
 	vp.InputEnded:Connect(function(input)
-		if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+		if input.UserInputType == Enum.UserInputType.MouseButton2 then
+			mode = nil
 			return
 		end
-		dragging = false
+		if input.UserInputType ~= Enum.UserInputType.MouseButton1 or mode ~= "pick" then
+			return
+		end
+		mode = nil
+		box.Visible = false
 		if moved > 4 then
+			local list = partsInBox(startPos, input.Position)
+			if #list > 0 or not shifted then
+				choose(list, shifted)
+			end
 			return
 		end
 		local p = partAt(input.Position)
 		if p then
-			selectPart(m, p)
-		else
-			selectModel(m) -- clicked empty space: back to the whole model
+			choose({ p }, shifted)
+		elseif not shifted then
+			whole() -- clicked empty space: back to the whole model
 		end
 	end)
 
 	inspector = { pick = pick }
-	if selected and selected.kind == "part" and selected.item == m then
+	if selected and selected.item == m and selected.kind == "part" then
 		pick(selected.part)
+	elseif selected and selected.item == m and selected.kind == "parts" then
+		pick(selected.parts)
 	else
 		pick(nil)
 	end
@@ -4437,7 +4741,34 @@ renderInserter = function()
 			end
 		end
 	end
-	infoBlock.Visible = next(expanded) == nil -- the open model view has its own details + buttons
+	local function expandMesh(m)
+		local key = "mesh:" .. tostring(m.id)
+		local open = not expanded[key]
+		expanded = {}
+		if open then
+			expanded[key] = true
+			justOpened = key
+			selectMesh(m)
+		end
+		renderInserter()
+		if open and not meshViews[m.id] then
+			meshViews[m.id] = { loading = true }
+			task.spawn(function()
+				local tpl, err = getMeshTemplate(m)
+				if tpl then
+					local roots = { tpl:Clone() }
+					local parts, partCount, meshCount = scanModelParts(roots)
+					meshViews[m.id] = { roots = roots, parts = parts, partCount = partCount, meshCount = meshCount }
+				else
+					meshViews[m.id] = { err = "Couldn't show this mesh: " .. tostring(err) }
+				end
+				if expanded[key] then
+					renderInserter()
+				end
+			end)
+		end
+	end
+	infoBlock.Visible = next(expanded) == nil -- the open view has its own details + buttons
 
 	-- MODELS -------------------------------------------------------------
 	local models = {}
@@ -4476,7 +4807,7 @@ renderInserter = function()
 					if grow and cache and (cache.roots or cache.err) then
 						justOpened = nil
 					end
-					buildInspector(m, cache, nextOrder(), grow, filter)
+					buildInspector(m, cache, nextOrder(), grow, filter, "model")
 					cont = nil
 				else
 					if not cont then
@@ -4484,7 +4815,7 @@ renderInserter = function()
 					end
 					local detail = "press + to open it"
 					if cache and cache.roots then
-						detail = string.format("%d parts  -  %d meshes", cache.partCount or 0, #(cache.parts or {}))
+						detail = string.format("%d parts  -  %d meshes", cache.partCount or 0, cache.meshCount or 0)
 					elseif cache and cache.err then
 						detail = "can't preview (see details)"
 					end
@@ -4506,6 +4837,10 @@ renderInserter = function()
 						end,
 						badge = "+",
 						onBadge = function()
+							expandModel(m)
+						end,
+						onOpen = function()
+							selectModel(m)
 							expandModel(m)
 						end,
 						actions = {
@@ -4541,11 +4876,24 @@ renderInserter = function()
 		if #meshes == 0 then
 			makeNote(insList, "No downloaded meshes yet.", nextOrder())
 		else
-			local cont = cardContainer(insList, nextOrder())
+			local cont = nil
 			for i, m in ipairs(meshes) do
 				if i > S.maxItems then
 					makeNote(insList, string.format("...and %d more - search, or raise 'Max items' in Settings.", #meshes - S.maxItems), nextOrder())
 					break
+				end
+				local mkey = "mesh:" .. tostring(m.id)
+				if expanded[mkey] then
+					local grow = justOpened == mkey
+					local view = meshViews[m.id]
+					if grow and view and (view.roots or view.err) then
+						justOpened = nil
+					end
+					buildInspector(m, view, nextOrder(), grow, filter, "mesh")
+					cont = nil
+				else
+				if not cont then
+					cont = cardContainer(insList, nextOrder())
 				end
 				local bones = tonumber(m.bones) or 0
 				local target = { kind = "mesh", item = m }
@@ -4572,11 +4920,15 @@ renderInserter = function()
 							insertTarget(target)
 						end },
 					},
+					onOpen = function()
+						expandMesh(m)
+					end,
 					onDrag = function(frame)
 						startCardDrag(ins, frame, target, m.name)
 					end,
 				})
 				insCards[m] = cd
+				end
 			end
 		end
 	end
@@ -4606,6 +4958,7 @@ refreshInserter = function()
 		table.sort(lib.models, byName)
 		lib.loaded = true
 		meshTemplates = {} -- looks / textures may have changed
+		meshViews = {}
 		if selected then
 			local list = selected.kind == "mesh" and lib.meshes or lib.models
 			local keyName = selected.kind == "mesh" and "id" or "key"
@@ -4643,6 +4996,57 @@ refreshLibButton.MouseButton1Click:Connect(refreshInserter)
 
 -- Inserting -----------------------------------------------------------------
 -- What to insert for a mesh / part / model
+-- Copies of some of a model's parts, at the model scale asked for (nil = as saved).
+-- The whole model is copied and scaled, so the parts keep their places relative to each other.
+local function scaledParts(entry, wanted, scale)
+	local want = {}
+	for _, inst in ipairs(wanted) do
+		want[inst] = true
+	end
+	local out = {}
+	for _, r in ipairs(entry.roots) do
+		local ok, c = pcall(function()
+			return r:Clone()
+		end)
+		if ok and c then
+			local o = r:GetDescendants()
+			table.insert(o, 1, r)
+			local cl = c:GetDescendants()
+			table.insert(cl, 1, c)
+			if scale and c:IsA("Model") then
+				pcall(function()
+					c:ScaleTo(scale)
+				end)
+			end
+			local picked = {}
+			if #o == #cl then
+				for i = 1, #o do
+					if want[o[i]] then
+						picked[cl[i]] = true
+					end
+				end
+			end
+			for inst in pairs(picked) do
+				-- keep a picked part inside another picked part where it is
+				local a, nested = inst.Parent, false
+				while a do
+					if picked[a] then
+						nested = true
+						break
+					end
+					a = a.Parent
+				end
+				if not nested then
+					inst.Parent = nil
+					table.insert(out, inst)
+				end
+			end
+			c:Destroy()
+		end
+	end
+	return out
+end
+
 local function instancesFor(target)
 	if target.kind == "mesh" then
 		local m = target.item
@@ -4653,15 +5057,29 @@ local function instancesFor(target)
 		local p = tpl:Clone()
 		p.Name = m.name
 		return { p }, m.name
-	elseif target.kind == "part" then
-		local clones = cloneAll({ target.part.inst })
+	end
+	local m = target.item
+	if target.kind == "part" or target.kind == "parts" then
+		local list = target.kind == "part" and { target.part } or target.parts
+		local entry = modelCache[m.key] or (m.id and meshViews[m.id])
+		local clones
+		if entry and entry.roots then
+			local insts = {}
+			for _, p in ipairs(list) do
+				table.insert(insts, p.inst)
+			end
+			clones = scaledParts(entry, insts, target.scale)
+		else
+			clones = cloneAll({ list[1].inst })
+		end
 		if #clones == 0 then
 			return nil, "Couldn't copy that part."
 		end
-		applyLocalTextures(clones[1])
-		return clones, target.part.name
+		for _, c in ipairs(clones) do
+			applyLocalTextures(c)
+		end
+		return clones, (#list == 1 and list[1].name or string.format("%d parts of %s", #list, m.name))
 	end
-	local m = target.item
 	local entry = modelCache[m.key]
 	if not entry or entry.loading then
 		entry = waitModel(m)
@@ -4671,9 +5089,14 @@ local function instancesFor(target)
 	end
 	local clones = cloneAll(entry.roots)
 	for _, c in ipairs(clones) do
+		if target.scale and c:IsA("Model") then
+			pcall(function()
+				c:ScaleTo(target.scale)
+			end)
+		end
 		applyLocalTextures(c)
 	end
-	return clones, m.name
+	return clones, m.name .. (target.scale and string.format(" (scale %g)", target.scale) or "")
 end
 
 -- in front of the camera
@@ -4738,7 +5161,49 @@ revealButton.MouseButton1Click:Connect(function()
 	end
 end)
 
--- Delete: click twice (the first click asks). Files go to the Recycle Bin.
+-- Delete (Recycle Bin) and rename - used by the details buttons and the open view
+deleteItem = function(kind, item)
+	local body = kind == "mesh" and { mesh = item.id } or { model = item.key }
+	local ok, res = request("POST", "/delete", HttpService:JSONEncode(body))
+	local d = ok and decodeBody(res)
+	if d and d.ok then
+		selected = nil
+		expanded = {}
+		setInfo("Click a card's name to see its details here.")
+		refreshInserter()
+		task.delay(0.6, function()
+			setInsStatus("Deleted " .. tostring(item.name or item.id) .. " (it's in the Recycle Bin).", GREEN)
+		end)
+	else
+		setInsStatus("Couldn't delete it - " .. tostring(d and d.error or "is Mesh Downloader open?"), RED)
+	end
+end
+
+renameItem = function(kind, item, name)
+	local body = kind == "mesh" and { mesh = item.id, name = name } or { model = item.key, name = name }
+	local ok, res = request("POST", "/rename", HttpService:JSONEncode(body))
+	local d = ok and decodeBody(res)
+	if not (d and d.ok) then
+		setInsStatus("Couldn't rename it - " .. tostring(d and d.error or "is Mesh Downloader open?"), RED)
+		renderInserter()
+		return
+	end
+	if kind == "model" and d.key and d.key ~= item.key then
+		-- the file moved: carry the open view, cache and scale over to the new name
+		if expanded[item.key] then
+			expanded = { [d.key] = true }
+		end
+		modelCache[d.key] = modelCache[item.key]
+		modelCache[item.key] = nil
+		insScale[d.key] = insScale[item.key]
+		insScale[item.key] = nil
+		item.key = d.key
+	end
+	item.name = name
+	setInsStatus("Renamed to " .. name .. ".", GREEN)
+	refreshInserter()
+end
+
 do
 	local armed, armedFor = false, nil
 	deleteButton.MouseButton1Click:Connect(function()
@@ -4763,19 +5228,7 @@ do
 		end
 		armed, armedFor = false, nil
 		deleteButton.Text = "Delete"
-		local body = target.kind == "mesh" and { mesh = target.item.id } or { model = target.item.key }
-		local ok, res = request("POST", "/delete", HttpService:JSONEncode(body))
-		local d = ok and decodeBody(res)
-		if d and d.ok then
-			selected = nil
-			setInfo("Click a card's name to see its details here.")
-			refreshInserter()
-			task.delay(0.6, function()
-				setInsStatus("Deleted " .. tostring(target.item.name or target.item.id) .. " (it's in the Recycle Bin).", GREEN)
-			end)
-		else
-			setInsStatus("Couldn't delete it - " .. tostring(d and d.error or "is Mesh Downloader open?"), RED)
-		end
+		deleteItem(target.kind, target.item)
 	end)
 end
 
@@ -5422,7 +5875,7 @@ local function buildSettingsPage(ctx)
 	}, "infoPos", applyInfoPos))
 
 	add(sectionTitle("3D previews", nx()))
-	add(dimText("Click a preview to open the big view. Its buttons: Keep open, Insert, Open (models), X.", nx(), 11))
+	add(dimText("Collector: click a preview to open the big view. Inserter: a preview opens right in the list, with its parts, Insert, rename and delete.", nx(), 11))
 	add(toggle("Also open the big view on hover", "hoverExpand", nx()))
 	add(slider("Hover wait before it opens", "hoverDelay", nx(), 0, 20, 1, secs))
 	add(slider("Grow / shrink speed", "expandSpeed", nx(), 0, 15, 1, secs))
@@ -5885,6 +6338,33 @@ end)
 			if type(file) == "string" then
 				tex, look = file, "overlay" -- painted head: Blender gets the unpainted picture + colour
 			end
+		elseif not holder then
+			-- a plain part (block, ball, cylinder, wedge) or a SpecialMesh shape (default head ...)
+			local shape, size = nil, p.Size
+			local sm = p:FindFirstChildWhichIsA("SpecialMesh")
+			if sm and sm.MeshType ~= Enum.MeshType.FileMesh then
+				local mt = sm.MeshType
+				shape = (mt == Enum.MeshType.Head and "head") or (mt == Enum.MeshType.Sphere and "ball")
+					or (mt == Enum.MeshType.Cylinder and "cylinder") or (mt == Enum.MeshType.Wedge and "wedge") or "block"
+				size = size * sm.Scale
+				cf = p.CFrame * CFrame.new(sm.Offset)
+			elseif p:IsA("WedgePart") then
+				shape = "wedge"
+			elseif p:IsA("CornerWedgePart") then
+				shape = "cornerwedge"
+			elseif p:IsA("Part") then
+				local sh = p.Shape
+				shape = (sh == Enum.PartType.Ball and "ball") or (sh == Enum.PartType.Cylinder and "cylinder")
+					or (sh == Enum.PartType.Wedge and "wedge") or (sh == Enum.PartType.CornerWedge and "cornerwedge") or "block"
+			end
+			if not shape or p.Transparency >= 1 then
+				return nil -- unions / trusses / invisible parts (like HumanoidRootPart)
+			end
+			ev.shape = shape
+			ev.size = { size.X, size.Y, size.Z }
+			ev.look = "opaque"
+			ev.cframe = { cf:GetComponents() }
+			return ev
 		elseif holder then
 			meshUri = holder.MeshId
 			tex = holder.TextureId
@@ -6013,7 +6493,9 @@ end)
 	-- model, as a Blender armature. Works when the meshes are gone - in Blender, put the
 	-- shapes back with "Attach meshes to rig".
 	local function rigOf(model)
-		local bones, partBone, names = {}, {}, {}
+		-- Motor6D joints become bones. Parts glued on with welds (clothing layers, accessories,
+		-- parts in models inside the rig) follow the bone of the part they're glued to.
+		local bones, partBone, names, partList = {}, {}, {}, {}
 		local function add(name, pos, parent, part)
 			local rec = { n = name, p = parent or -1, pos = { pos.X, pos.Y, pos.Z } }
 			if part then
@@ -6025,10 +6507,22 @@ end)
 			names[name] = #bones - 1
 			return #bones - 1
 		end
-		local motors, parts = {}, {}
+		local motors, welds, parts = {}, {}, {}
 		for _, d in ipairs(model:GetDescendants()) do
-			if d:IsA("Motor6D") and d.Part0 and d.Part1 then
-				table.insert(motors, d)
+			if d:IsA("Motor6D") then
+				if d.Part0 and d.Part1 then
+					table.insert(motors, d)
+				end
+			elseif d:IsA("JointInstance") or d:IsA("WeldConstraint") then
+				local ok0, a = pcall(function()
+					return d.Part0
+				end)
+				local ok1, b = pcall(function()
+					return d.Part1
+				end)
+				if ok0 and ok1 and a and b then
+					table.insert(welds, { a, b })
+				end
 			elseif d:IsA("BasePart") then
 				table.insert(parts, d)
 			end
@@ -6052,29 +6546,42 @@ end)
 			return nil
 		end
 		partBone[root] = add(root.Name, root.Position, -1, root)
-		-- joints, parents first
-		local left = #motors
-		while left > 0 do
+		-- walk the joints out from the root: Motor6D = new bone, weld = same bone
+		repeat
 			local progress = false
 			for _, m in ipairs(motors) do
 				if partBone[m.Part0] and not partBone[m.Part1] then
 					local joint = (m.Part0.CFrame * m.C0).Position
 					partBone[m.Part1] = add(m.Part1.Name, joint, partBone[m.Part0], m.Part1)
-					left = left - 1
+					progress = true
+				elseif partBone[m.Part1] and not partBone[m.Part0] and m.Part0 ~= root then
+					-- joint written the other way round
+					local joint = (m.Part1.CFrame * m.C1).Position
+					partBone[m.Part0] = add(m.Part0.Name, joint, partBone[m.Part1], m.Part0)
 					progress = true
 				end
 			end
-			if not progress then
-				break
+			for _, w in ipairs(welds) do
+				local a, b = w[1], w[2]
+				if partBone[a] and not partBone[b] then
+					partBone[b] = partBone[a]
+					progress = true
+				elseif partBone[b] and not partBone[a] then
+					partBone[a] = partBone[b]
+					progress = true
+				end
 			end
-		end
-		-- parts with no joint still get a bone (so their mesh has something to follow)
+		until not progress
+		-- every part, and the bone it follows (loose parts follow the root)
 		for _, pt in ipairs(parts) do
-			if not partBone[pt] and not names[pt.Name] then
-				partBone[pt] = add(pt.Name, pt.Position, partBone[root], pt)
-			end
+			table.insert(partList, {
+				n = pt.Name,
+				b = partBone[pt] or partBone[root],
+				pcf = { pt.CFrame:GetComponents() },
+				size = { pt.Size.X, pt.Size.Y, pt.Size.Z },
+			})
 		end
-		-- Bones (skinned rigs). One named like a part is the same joint: skipped.
+		-- Bones (skinned rigs). One named like a joint bone is the same joint: skipped.
 		local boneIndex = {}
 		for _, d in ipairs(model:GetDescendants()) do
 			if d:IsA("Bone") and not names[d.Name] then
@@ -6092,7 +6599,7 @@ end)
 				boneIndex[d] = names[d.Name]
 			end
 		end
-		return bones
+		return bones, partList
 	end
 
 	local rigButton = toolbar:CreateButton("Send Rig to Blender", "Send only the skeleton (joints + Bones) of the selected model to Blender - works even when its meshes are missing", "")
@@ -6103,14 +6610,14 @@ end)
 			local list = {}
 			for _, sel in ipairs(Selection:Get()) do
 				local model = sel:IsA("BasePart") and (sel:FindFirstAncestorWhichIsA("Model") or sel) or sel
-				local bones = rigOf(model)
+				local bones, partList = rigOf(model)
 				if bones and #bones > 0 then
 					local key = model:GetAttribute("BlenderRigKey")
 					if type(key) ~= "string" then
 						key = string.lower((string.gsub(HttpService:GenerateGUID(false), "%W", "")))
 						model:SetAttribute("BlenderRigKey", key)
 					end
-					table.insert(list, { type = "rig", key = key, name = model.Name, bones = bones })
+					table.insert(list, { type = "rig", key = key, name = model.Name, bones = bones, parts = partList })
 				end
 			end
 			if #list == 0 then

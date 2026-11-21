@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v6.7
+ROBLOX MESH TOOLS v6.8
 ======================
 
 What's in here
@@ -242,6 +242,10 @@ STUDIO -> BLENDER (and keeping both in sync)
   Meshes that aren't downloaded yet are downloaded first (needs your API
   key). Blender can also open .mesh files directly: File > Import >
   Roblox Mesh (.mesh) - any version, Draco-compressed ones too.
+  Plain parts (blocks, balls, cylinders, wedges, the default head) go to
+  Blender as their shapes. Things from far from Studio's centre arrive at
+  Blender's centre (Options > "Centre things from Studio") and go back to the
+  right place.
   RIG WITHOUT ITS MESHES (e.g. an .rbxm whose meshes are gone) + the shapes
   from somewhere else (an .obj):
     1. Studio: insert the .rbxm, select the model > toolbar "Send Rig to
@@ -258,6 +262,15 @@ STUDIO -> BLENDER (and keeping both in sync)
   Once you've changed a part in Blender, Studio's undo won't rebuild it in
   Blender from the older mesh - send it again from Blender instead.
 
+OPEN VIEW (Mesh Inserter): click a card's preview - it opens right there in
+the list (meshes and models). In it:
+  - click a part (plain parts / default limbs too), Shift+click to add more,
+    or drag a box around parts; right-drag turns the view, scroll zooms
+  - Insert model / Insert part / Insert N parts
+  - Scale (models): what it was saved at - type 1 to insert a model saved at
+    0.9 back at normal size; Reset goes back to the saved scale
+  - click the name to rename it (models: the file is renamed too)
+  - trash icon > Sure? deletes it (to the Recycle Bin)
 DELETE (Mesh Inserter): pick a card > Delete > click again to confirm.
 The files go to the Recycle Bin (restore them from there if you change your
 mind - Mesh Downloader puts them back into Studio when it next syncs).

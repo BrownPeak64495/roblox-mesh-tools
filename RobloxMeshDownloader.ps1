@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.7'
+$AppVersion = '6.8'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1670,7 +1670,14 @@ $script:tickCount = 0
 function Resolve-ToBlender($p, [bool]$noWait = $false) {
     if ([string]$p.type -eq 'rig') {
         # skeleton only: nothing to download
-        return @{ type = 'rig'; key = [string]$p.key; name = (Clean-Field ([string]$p.name)); bones = @($p.bones) }
+        return @{ type = 'rig'; key = [string]$p.key; name = (Clean-Field ([string]$p.name)); bones = @($p.bones); parts = @($p.parts) }
+    }
+    if ([string]$p.shape -match '^(block|ball|cylinder|wedge|cornerwedge|head)$') {
+        # a plain part: Blender builds the shape itself
+        $ev = @{ key = [string]$p.key; name = (Clean-Field ([string]$p.name)); shape = [string]$p.shape
+                 look = 'opaque'; transparency = [double]$p.transparency }
+        foreach ($f in @('color', 'cframe', 'size')) { if ($p.$f) { $ev[$f] = [double[]]@($p.$f) } }
+        return $ev
     }
     $id = [string]$p.meshId
     if ($id -notmatch '^\d{5,}$') { return $null }
@@ -2022,6 +2029,34 @@ function Handle-Request($ctx) {
             Log ("Saved model {0} ({1})" -f $rel, (Format-Size $mb.Length))
             Send-Json $ctx @{ ok = $true; done = $true; path = $rel; full = $file }
             if ($TglOpen.IsChecked) { Start-Process explorer.exe "/select,`"$file`"" }
+            return
+        }
+        if ($path -eq '/rename' -and $ctx.Request.HttpMethod -eq 'POST') {
+            # Inserter: rename a mesh (its name in the library) or a model (its file)
+            $sr = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8)
+            $d = $sr.ReadToEnd() | ConvertFrom-Json; $sr.Close()
+            $name = Clean-Field ([string]$d.name)
+            if (-not $name) { Send-Json $ctx @{ ok = $false; error = 'empty name' } 400; return }
+            try {
+                if ([string]$d.mesh -match '^\d{5,}$') {
+                    $id = [string]$d.mesh
+                    if (-not $script:index.ContainsKey($id)) { Send-Json $ctx @{ ok = $false; error = 'mesh not in the library' } 404; return }
+                    $script:index[$id].name = $name
+                    Save-Index
+                    Send-Json $ctx @{ ok = $true }
+                } elseif ($d.model) {
+                    $full = Resolve-SafeModelPath ([string]$d.model)
+                    if (-not $full) { Send-Json $ctx @{ ok = $false; error = 'model file not found' } 404; return }
+                    $safe = Get-SafeName $name
+                    $dest = Join-Path ([IO.Path]::GetDirectoryName($full)) ($safe + [IO.Path]::GetExtension($full))
+                    if ($dest -ne $full) {
+                        if (Test-Path -LiteralPath $dest) { Send-Json $ctx @{ ok = $false; error = 'a model with that name is already in that folder' } 409; return }
+                        Move-Item -LiteralPath $full -Destination $dest
+                    }
+                    $root = Get-SaveRoot
+                    Send-Json $ctx @{ ok = $true; key = $dest.Substring($root.Length).TrimStart('\') }
+                } else { Send-Json $ctx @{ ok = $false; error = 'bad request' } 400 }
+            } catch { Send-Json $ctx @{ ok = $false; error = $_.Exception.Message } 500 }
             return
         }
         if ($path -eq '/delete' -and $ctx.Request.HttpMethod -eq 'POST') {

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 7, 0),
+    "version": (1, 8, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -625,6 +625,8 @@ def send_object(obj, props, depsgraph):
             maps.append({"kind": kind, "hash": h, "ext": ext})
             blobs[h] = (b, ext)
 
+    off = _offset(props)
+    info["center"] = [float(c) + float(o) for c, o in zip(info["center"], off)]
     meta = {"key": key, "name": obj.name, "center": info["center"], "size": info["size"],
             "maps": maps, "alpha": look["alpha"], "double": look["double"]}
     if look["tint"] is not None:
@@ -1125,14 +1127,37 @@ def _rbx_matrix(cf, scale=None):
     return m
 
 
-def _to_blender_space(m, props):
-    """Roblox-space 4x4 (studs) -> Blender-space 4x4 (metres)."""
+def _offset(props):
+    """Where Studio's (0,0,0) is moved to, so things from far-away places land near Blender's centre."""
+    return np.array(props.studio_offset, dtype=np.float64) if props.studio_offset_set else np.zeros(3)
+
+
+def _set_offset(props, at):
+    """First thing from Studio decides the offset (only if nothing has been sent from this file yet)."""
+    if props.studio_offset_set:
+        return
+    props.studio_offset_set = True
+    sent_before = any(o.get("roblox_sent_id") or (o.get(KEY_PROP) and not o.get("roblox_mesh_id")) for o in bpy.data.objects)
+    if props.center_studio and not sent_before and at is not None:
+        props.studio_offset = [round(float(v)) for v in at]
+    else:
+        props.studio_offset = (0.0, 0.0, 0.0)
+
+
+def _space_matrices(props):
+    """k: Roblox world (studs) -> Blender world (metres), including the offset. kl: same without it."""
     ax = _axis_matrix(props)
-    k = np.eye(4)
-    k[:3, :3] = ax.T / props.studs_per_meter
-    ki = np.eye(4)
-    ki[:3, :3] = ax * props.studs_per_meter
-    return k @ m @ ki
+    kl = np.eye(4)
+    kl[:3, :3] = ax.T / props.studs_per_meter
+    t = np.eye(4)
+    t[:3, 3] = -_offset(props)
+    return kl @ t, kl
+
+
+def _to_blender_space(m, props):
+    """A Roblox-space change (4x4, studs) -> the same change in Blender space."""
+    k, _ = _space_matrices(props)
+    return k @ m @ np.linalg.inv(k)
 
 
 def _follow_studio(obj, ev, props):
@@ -1154,20 +1179,10 @@ def _follow_studio(obj, ev, props):
 
 
 def _cframe_matrix(cf, props):
-    """Roblox CFrame (x, y, z, R00..R22) -> Blender object matrix."""
+    """Roblox CFrame (x, y, z, R00..R22) -> Blender object matrix (object space = mesh space in metres)."""
     import mathutils
-    ax = _axis_matrix(props)
-    s = props.studs_per_meter
-    r = np.array(cf[3:12], dtype=np.float64).reshape(3, 3)
-    t = np.array(cf[0:3], dtype=np.float64)
-    rb = ax.T @ r @ ax
-    tb = ax.T @ t / s
-    m = mathutils.Matrix.Identity(4)
-    for i in range(3):
-        for j in range(3):
-            m[i][j] = rb[i, j]
-        m[i][3] = tb[i]
-    return m
+    k, kl = _space_matrices(props)
+    return mathutils.Matrix((k @ _rbx_matrix(cf) @ np.linalg.inv(kl)).tolist())
 
 
 def build_object(name, mesh, props, scale=(1, 1, 1), image=None, look="opaque", color=None, transparency=0.0, matrix=None):
@@ -1272,9 +1287,109 @@ def _remove_object(o):
         bpy.data.objects.remove(rig, do_unlink=True)
 
 
+def shape_mesh(shape, size):
+    """A Roblox plain-part shape as mesh arrays in the part's own space (studs)."""
+    sx, sy, sz = [float(v) for v in size]
+    pos, nrm, faces = [], [], []
+
+    def quad(a, b, c, d, n):
+        i = len(pos)
+        pos.extend([a, b, c, d])
+        nrm.extend([n] * 4)
+        faces.extend([[i, i + 1, i + 2], [i, i + 2, i + 3]])
+
+    def tri(a, b, c, n):
+        i = len(pos)
+        pos.extend([a, b, c])
+        nrm.extend([n] * 3)
+        faces.append([i, i + 1, i + 2])
+
+    def ring_body(axis, length, radius_a, radius_b, n=24, caps=True):
+        # cylinder along axis 0 (X) or 1 (Y)
+        def P(t, ang):
+            c, s_ = np.cos(ang) * radius_a, np.sin(ang) * radius_b
+            return [t, c, s_] if axis == 0 else [c, t, s_]
+        h = length / 2
+        base = len(pos)
+        for k in range(n + 1):
+            ang = 2 * np.pi * k / n
+            for t in (-h, h):
+                pos.append(P(t, ang))
+                v = P(0, ang)
+                ln = np.linalg.norm(v) or 1
+                nrm.append([x / ln for x in v])
+        for k in range(n):
+            a = base + 2 * k
+            if axis == 0:
+                faces.extend([[a, a + 2, a + 1], [a + 1, a + 2, a + 3]])
+            else:
+                faces.extend([[a, a + 1, a + 2], [a + 1, a + 3, a + 2]])
+        if caps:
+            for t, sgn in ((-h, -1), (h, 1)):
+                cn = [sgn, 0, 0] if axis == 0 else [0, sgn, 0]
+                c = len(pos)
+                pos.append(P(t, 0)[:0] + ([t, 0, 0] if axis == 0 else [0, t, 0]))
+                nrm.append(cn)
+                for k in range(n + 1):
+                    pos.append(P(t, 2 * np.pi * k / n))
+                    nrm.append(cn)
+                for k in range(n):
+                    a, b = c + 1 + k, c + 2 + k
+                    flip = (sgn > 0) == (axis == 0)
+                    faces.append([c, a, b] if flip else [c, b, a])
+
+    x, y, z = sx / 2, sy / 2, sz / 2
+    if shape in ("block", "cornerwedge"):
+        quad([x, -y, -z], [x, y, -z], [x, y, z], [x, -y, z], [1, 0, 0])
+        quad([-x, -y, z], [-x, y, z], [-x, y, -z], [-x, -y, -z], [-1, 0, 0])
+        quad([-x, y, -z], [-x, y, z], [x, y, z], [x, y, -z], [0, 1, 0])
+        quad([-x, -y, z], [-x, -y, -z], [x, -y, -z], [x, -y, z], [0, -1, 0])
+        quad([-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z], [0, 0, 1])
+        quad([x, -y, -z], [-x, -y, -z], [-x, y, -z], [x, y, -z], [0, 0, -1])
+    elif shape == "wedge":
+        # full bottom and back (+Z); the slope runs from the top of the back down to the front
+        sl = np.array([0, sz, sy], dtype=np.float64)
+        sl = (sl / np.linalg.norm(sl)).tolist()
+        quad([-x, -y, z], [-x, -y, -z], [x, -y, -z], [x, -y, z], [0, -1, 0])
+        quad([-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z], [0, 0, 1])
+        quad([x, -y, -z], [-x, -y, -z], [-x, y, z], [x, y, z], sl)
+        tri([x, -y, -z], [x, y, z], [x, -y, z], [1, 0, 0])
+        tri([-x, -y, z], [-x, y, z], [-x, -y, -z], [-1, 0, 0])
+    elif shape == "ball":
+        r = min(sx, sy, sz) / 2
+        nu, nv = 24, 16
+        base = len(pos)
+        for i in range(nv + 1):
+            th = np.pi * i / nv
+            for j in range(nu + 1):
+                ph = 2 * np.pi * j / nu
+                d = [np.sin(th) * np.cos(ph), np.cos(th), np.sin(th) * np.sin(ph)]
+                pos.append([r * c for c in d])
+                nrm.append(d)
+        for i in range(nv):
+            for j in range(nu):
+                a = base + i * (nu + 1) + j
+                b = a + nu + 1
+                faces.extend([[a, a + 1, b], [a + 1, b + 1, b]])
+    elif shape == "cylinder":
+        ring_body(0, sx, min(sy, sz) / 2, min(sy, sz) / 2)
+    elif shape == "head":
+        ring_body(1, sy, sx / 2, sz / 2)
+    pos = np.array(pos, dtype=np.float64)
+    nrm = np.array(nrm, dtype=np.float64)
+    faces = np.array(faces, dtype=np.int64)
+    # keep every triangle facing outwards (so Blender's shading matches the normals)
+    a, b, c = pos[faces[:, 0]], pos[faces[:, 1]], pos[faces[:, 2]]
+    fn = np.cross(b - a, c - a)
+    wrong = (fn * (nrm[faces[:, 0]] + nrm[faces[:, 1]] + nrm[faces[:, 2]])).sum(1) < 0
+    faces[wrong] = faces[wrong][:, [0, 2, 1]]
+    return {"pos": pos, "nrm": nrm, "uv": np.zeros((len(pos), 2)), "faces": faces, "bones": [],
+            "skin_idx": None, "skin_w": None}
+
+
 def _rbx_point(p, props):
     ax = _axis_matrix(props)
-    return np.array(p, dtype=np.float64) @ ax / props.studs_per_meter
+    return (np.array(p, dtype=np.float64) - _offset(props)) @ ax / props.studs_per_meter
 
 
 def build_rig(ev, props):
@@ -1293,17 +1408,33 @@ def build_rig(ev, props):
         bpy.context.scene.collection.objects.link(rig)
     rig["roblox_rig_from_studio"] = key
     rig["roblox_rig_key"] = key                 # meshes on it share one skeleton in Studio
+    plist = ev.get("parts") or []
+    if plist:
+        lo = min(float(pp["pcf"][1]) - abs(float(pp["size"][1])) / 2 for pp in plist)
+        r0 = bones[0]["pos"] if bones else plist[0]["pcf"][0:3]
+        _set_offset(props, (r0[0], lo, r0[2]))   # feet on the ground, at the centre
+    elif bones:
+        _set_offset(props, bones[0]["pos"])
     heads = [_rbx_point(b["pos"], props) for b in bones]
-    parts = {}
-    ax = _axis_matrix(props)
+    parts = []
+    for pp in plist:
+        bi = int(pp.get("b", 0))
+        parts.append({"part": str(pp.get("n") or ""),
+                      "bone": bones[bi]["n"] if 0 <= bi < len(bones) else bones[0]["n"],
+                      "center": _rbx_point(pp["pcf"][0:3], props).tolist(),
+                      "size": (np.abs(np.array(pp.get("size") or [1, 1, 1], dtype=np.float64)) / props.studs_per_meter).tolist()})
+    if not parts:                               # older plugin: parts came with the bones
+        for b in bones:
+            if b.get("part") and b.get("pcf"):
+                parts.append({"part": b["part"], "bone": b["n"], "center": _rbx_point(b["pcf"][0:3], props).tolist(),
+                              "size": (np.abs(np.array(b.get("size") or [1, 1, 1], dtype=np.float64)) / props.studs_per_meter).tolist()})
+    rig["roblox_parts"] = json.dumps(parts)
+    own = {}                                   # bone -> the part it was made for (its joint's part)
     for b in bones:
         if b.get("part") and b.get("pcf"):
-            parts[b["n"]] = {"part": b["part"],
-                             "center": _rbx_point(b["pcf"][0:3], props).tolist(),
-                             "size": (np.abs(np.array(b.get("size") or [1, 1, 1], dtype=np.float64)) / props.studs_per_meter).tolist()}
-    rig["roblox_parts"] = json.dumps(parts)
-    skin = len(bones) > len(parts)
-    rig["roblox_has_skin_bones"] = skin
+            own[b["n"]] = {"center": _rbx_point(b["pcf"][0:3], props),
+                           "size": float(np.max(np.abs(np.array(b.get("size") or [1, 1, 1], dtype=np.float64)))) / props.studs_per_meter}
+    rig["roblox_has_skin_bones"] = any(not b.get("part") for b in bones)
 
     prev = bpy.context.view_layer.objects.active
     for o in bpy.context.view_layer.objects:
@@ -1317,13 +1448,15 @@ def build_rig(ev, props):
         eb = arm_data.edit_bones.new(b["n"] or ("Bone%d" % i))
         head = heads[i]
         kids = [j for j, c in enumerate(bones) if c["p"] == i and np.linalg.norm(heads[j] - head) > 1e-4]
-        if kids:
-            tail = heads[kids[0]] if len(kids) == 1 else np.mean([heads[j] for j in kids], axis=0)
-        elif b["n"] in parts:
-            c = np.array(parts[b["n"]]["center"])
-            tail = c + (c - head) if np.linalg.norm(c - head) > 1e-3 else head + np.array([0, 0, max(parts[b["n"]]["size"]) * 0.5])
+        mine = own.get(b["n"])
+        if mine is not None and np.linalg.norm(mine["center"] - head) > 1e-3:
+            tail = head + 2 * (mine["center"] - head)      # through its own part: shoulder -> elbow, neck -> top of head
+        elif mine is not None:
+            tail = head + np.array([0, 0, mine["size"] * 0.5])   # root: joint in the middle of its part
+        elif len(kids) == 1:
+            tail = heads[kids[0]]
         else:
-            tail = head + np.array([0, 0, 0.1 / max(props.studs_per_meter, 1e-6) * 3])
+            tail = head + np.array([0, 0, 0.3 / max(props.studs_per_meter, 1e-6)])
         if np.linalg.norm(tail - head) < 1e-4:
             tail = head + np.array([0, 0, 0.05])
         eb.head = head.tolist()
@@ -1346,8 +1479,14 @@ def apply_studio_event(ev, props):
         return
     key = str(ev.get("key") or "")
     mesh_id = str(ev.get("meshId") or "")
+    if ev.get("shape"):
+        mesh_id = "shape:" + str(ev["shape"])
     if not key or not mesh_id:
         return
+    if ev.get("cframe"):
+        cf = ev["cframe"]
+        bottom = float(cf[1]) - float((ev.get("size") or [0, 0, 0])[1]) / 2
+        _set_offset(props, (cf[0], bottom, cf[2]))
     matrix = _cframe_matrix(ev["cframe"], props) if ev.get("cframe") else None
     obj = _find_linked(key)
     if obj is not None and mesh_id == str(obj.get("roblox_sent_id") or ""):
@@ -1382,7 +1521,12 @@ def apply_studio_event(ev, props):
             _set_colour(obj, ev)
             obj["roblox_look_key"] = "%s|%s|%.3f" % (tex_name, look, transparency)
         return
-    mesh = read_mesh(_get(props, "/blender/file?kind=mesh&id=" + mesh_id, 10))
+    if ev.get("shape"):
+        mesh = shape_mesh(ev["shape"], ev.get("size") or [1, 1, 1])
+        ev = dict(ev)
+        ev.pop("size", None)          # the shape already has its size
+    else:
+        mesh = read_mesh(_get(props, "/blender/file?kind=mesh&id=" + mesh_id, 10))
     if ev.get("centerMesh"):
         mid = (mesh["pos"].max(axis=0) + mesh["pos"].min(axis=0)) / 2.0
         mesh["pos"] = mesh["pos"] - mid
@@ -1550,26 +1694,27 @@ class RMT_OT_attach(bpy.types.Operator):
         import mathutils
         rig = context.active_object
         meshes = [o for o in context.selected_objects if o.type == "MESH"]
-        parts = json.loads(rig.get("roblox_parts") or "{}")
-        bone_names = {b.name for b in rig.data.bones}
+        raw = json.loads(rig.get("roblox_parts") or "[]")
+        if isinstance(raw, dict):                  # made by 6.6
+            raw = [dict(v, bone=k) for k, v in raw.items()]
+        parts = [p for p in raw if p.get("bone") in rig.data.bones]
         by_norm = {}
-        for bone, info in parts.items():
-            by_norm[_norm_name(info["part"])] = bone
-        for bn in bone_names:
-            by_norm.setdefault(_norm_name(bn), bn)
-        match = {}
+        for i, pinfo in enumerate(parts):
+            by_norm.setdefault(_norm_name(pinfo["part"]), []).append(i)
+        match = {}                                 # mesh -> index in parts (unique names only)
         for o in meshes:
-            n = _norm_name(o.name)
-            if n in by_norm:
-                match[o] = by_norm[n]
-            elif o.data.name and _norm_name(o.data.name) in by_norm:
-                match[o] = by_norm[_norm_name(o.data.name)]
+            for nm in (o.name, o.data.name):
+                hit = by_norm.get(_norm_name(nm or ""))
+                if hit and len(hit) == 1:
+                    match[o] = hit[0]
+                    break
 
         note = ""
-        pairs = [(o, b) for o, b in match.items() if b in parts]
+        pairs = list(match.items())
         if self.line_up and len(pairs) >= 3:
-            m, err = _fit_similarity([_world_center(o) for o, _ in pairs], [parts[b]["center"] for _, b in pairs])
-            size = max(np.linalg.norm(np.array(parts[b]["center"]) - np.array(parts[pairs[0][1]]["center"])) for _, b in pairs) or 1.0
+            dst = [parts[i]["center"] for _, i in pairs]
+            m, err = _fit_similarity([_world_center(o) for o, _ in pairs], dst)
+            size = max(np.linalg.norm(np.array(d) - np.array(dst[0])) for d in dst) or 1.0
             mm = mathutils.Matrix(m.tolist())
             for o in meshes:
                 if o.parent is None or o.parent not in meshes:
@@ -1581,19 +1726,22 @@ class RMT_OT_attach(bpy.types.Operator):
             note = " | not lined up (needs 3+ pieces named like the rig's parts)"
 
         smooth_rig = bool(rig.get("roblox_has_skin_bones"))
-        centers = {b: np.array(i["center"]) for b, i in parts.items()}
         stiff_n = smooth_n = 0
         for o in meshes:
             for md in [md for md in o.modifiers if md.type == "ARMATURE"]:
                 o.modifiers.remove(md)
-            bone = match.get(o)
+            hit = match.get(o)
+            bone = parts[hit]["bone"] if hit is not None else None
             mode = self.mode
             if mode == "AUTO":
                 mode = "STIFF" if (bone or not smooth_rig) else "SMOOTH"
             if mode == "STIFF":
-                if bone is None and centers:
+                if bone is None and parts:
+                    # same name as several parts, or no name match: the nearest part of that name / any part
                     c = _world_center(o)
-                    bone = min(centers, key=lambda b: np.linalg.norm(centers[b] - c))
+                    pool = by_norm.get(_norm_name(o.name)) or range(len(parts))
+                    near = min(pool, key=lambda i: np.linalg.norm(np.array(parts[i]["center"]) - c))
+                    bone = parts[near]["bone"]
                 if bone is None:
                     mode = "SMOOTH"
             mw = o.matrix_world.copy()
@@ -1621,6 +1769,20 @@ class RMT_OT_attach(bpy.types.Operator):
         msg = "Attached %d piece(s) stiff, %d smooth%s" % (stiff_n, smooth_n, note)
         _state["status"] = msg
         self.report({"INFO"}, msg)
+        return {"FINISHED"}
+
+
+class RMT_OT_reset_offset(bpy.types.Operator):
+    bl_idname = "roblox_mesh_tools.reset_offset"
+    bl_label = "Pick the centre again"
+    bl_description = ("The next thing from Studio picks a new centre. Objects already linked to Studio "
+                      "would land in the wrong place in Studio when resent - only do this in a fresh file")
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        props = context.scene.roblox_mesh_tools
+        props.studio_offset_set = False
+        props.studio_offset = (0.0, 0.0, 0.0)
         return {"FINISHED"}
 
 
@@ -1684,6 +1846,12 @@ class RMT_Props(bpy.types.PropertyGroup):
         name="Wait", default=1.0, min=0.2, max=10.0, subtype="TIME", unit="TIME",
         description="How long the mesh has to stop changing before it resends (poses go right away)")
     port: bpy.props.IntProperty(name="Port", default=47820, min=1, max=65535)
+    center_studio: bpy.props.BoolProperty(
+        name="Centre things from Studio", default=True,
+        description="Things sent from a place far from Studio's centre arrive at Blender's centre (feet on the ground). Sending back puts them where they were in Studio")
+    studio_offset: bpy.props.FloatVectorProperty(name="Studio offset", size=3, default=(0.0, 0.0, 0.0),
+                                                 description="Studio position (studs) that sits at Blender's centre")
+    studio_offset_set: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     receive: bpy.props.BoolProperty(
         name="Receive from Studio", default=True,
         description="Parts sent with 'Send to Blender' in Studio show up here, and stay linked both ways")
@@ -1815,9 +1983,15 @@ class RMT_PT_options(bpy.types.Panel):
         col.prop(props, "flip_faces")
         col.prop(props, "turn_around")
         col.prop(props, "port")
+        col.separator()
+        col.prop(props, "center_studio")
+        if props.studio_offset_set:
+            r = col.row()
+            r.label(text="Studio (%.0f, %.0f, %.0f) is at the centre" % tuple(props.studio_offset))
+            r.operator("roblox_mesh_tools.reset_offset", text="", icon="X")
 
 
-CLASSES = (RMT_Props, RMT_OT_send, RMT_OT_pose, RMT_OT_unlink, RMT_OT_import, RMT_OT_attach, RMT_PT_panel, RMT_PT_options)
+CLASSES = (RMT_Props, RMT_OT_send, RMT_OT_pose, RMT_OT_unlink, RMT_OT_import, RMT_OT_attach, RMT_OT_reset_offset, RMT_PT_panel, RMT_PT_options)
 
 
 def register():
