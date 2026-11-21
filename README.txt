@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v7.1
+ROBLOX MESH TOOLS v7.2
 ======================
 
 What's in here
@@ -208,6 +208,11 @@ of the object's first material:
   Several materials with different pictures on one object: a MeshPart holds
   one picture, so each material becomes its own part ("Name (Material)").
   Pictures are sent as you see them in Blender - painted-but-unsaved ones too.
+  UVs: the add-on uses the UV map the picture actually uses (its UV Map node,
+  else the one with the camera icon in UV Maps), and bakes a Mapping node's
+  scale / move / turn into the UVs. Pictures placed some other way
+  (Generated / Object coordinates, Box projection, UDIM tiles) can't carry
+  over - the status line says so; unwrap + bake them to a picture first.
   If you add your own SurfaceAppearance in Studio, it's left alone.
   Colours look different? Blender shows colours through a "View Transform"
   (AgX or Filmic by default) that Roblox doesn't use. To compare fairly:

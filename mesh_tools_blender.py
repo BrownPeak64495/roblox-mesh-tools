@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 11, 0),
+    "version": (1, 12, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -121,7 +121,7 @@ def _bone_order(arm):
 
 
 # ------------------------------------------------------------------ mesh data
-def _read_mesh(obj, depsgraph, props, arm, want_tangents=False, mat_index=None):
+def _read_mesh(obj, depsgraph, props, arm, want_tangents=False, mat_index=None, uv_spec=None):
     """Corner-level data in Blender world space (+ per-corner bone weights when skinned,
     + tangents for normal maps)."""
     src = obj.evaluated_get(depsgraph) if props.apply_modifiers else obj
@@ -145,11 +145,21 @@ def _read_mesh(obj, depsgraph, props, arm, want_tangents=False, mat_index=None):
         me.vertices.foreach_get("co", co)
         co = co.reshape(-1, 3)
         cn = _corner_normals(me)
-        uv_layer = me.uv_layers.active
+        # the UV map the picture uses: the one its UV Map node names, else the render one
+        # (the camera icon in the UV Maps list) - not just the one selected for editing
+        want = (uv_spec or {}).get("name")
+        uv_layer = me.uv_layers.get(want) if want else None
+        if uv_layer is None:
+            uv_layer = next((l for l in me.uv_layers if l.active_render), None) or me.uv_layers.active
         if uv_layer is not None:
             uv = np.empty(len(me.loops) * 2, dtype=np.float32)
             uv_layer.data.foreach_get("uv", uv)
             uv = uv.reshape(-1, 2)
+            mp = (uv_spec or {}).get("mapping")
+            if mp is not None:
+                # bake the Mapping node (scale / move / turn) into the UVs, like Blender shows it
+                h = np.hstack([uv.astype(np.float64), np.zeros((len(uv), 1)), np.ones((len(uv), 1))])
+                uv = (h @ np.asarray(mp).T)[:, :2].astype(np.float32)
         else:
             uv = np.zeros((len(me.loops), 2), dtype=np.float32)
 
@@ -225,7 +235,7 @@ def _skin_table(weights, bone_index, fallback):
     return idx, wts, over
 
 
-def build_mesh(obj, depsgraph, props, normal_map=False, mat_index=None):
+def build_mesh(obj, depsgraph, props, normal_map=False, mat_index=None, uv_spec=None):
     """Returns (bytes, info). info: center, size, verts, tris, bones (or None), over4."""
     arm = find_armature(obj) if props.send_bones else None
     if arm is not None:
@@ -234,12 +244,12 @@ def build_mesh(obj, depsgraph, props, normal_map=False, mat_index=None):
         arm.data.pose_position = "REST"
         bpy.context.view_layer.update()
         try:
-            pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, bpy.context.evaluated_depsgraph_get(), props, arm, True, mat_index)
+            pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, bpy.context.evaluated_depsgraph_get(), props, arm, True, mat_index, uv_spec)
         finally:
             arm.data.pose_position = old
             bpy.context.view_layer.update()
     else:
-        pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, depsgraph, props, None, normal_map, mat_index)
+        pos, nrm, tuv, tng, corner_v, weights, mirrored = _read_mesh(obj, depsgraph, props, None, normal_map, mat_index, uv_spec)
 
     ax = _axis_matrix(props)
     pos = (pos @ ax.T) * props.studs_per_meter
@@ -509,6 +519,83 @@ def _image_upstream(sock, depth=0):
     return None
 
 
+def _tex_node_upstream(sock, depth=0):
+    if sock is None or not sock.is_linked or depth > 5:
+        return None
+    node = sock.links[0].from_node
+    if node.type == "TEX_IMAGE":
+        return node
+    for inp in node.inputs:
+        if inp.type in ("RGBA", "VALUE", "VECTOR"):
+            n = _tex_node_upstream(inp, depth + 1)
+            if n is not None:
+                return n
+    return None
+
+
+def _texture_uv(tex):
+    """How a picture node is placed on the mesh: (UV map name or None = the render one,
+    4x4 Mapping-node matrix or None, problem text or None)."""
+    if tex is None:
+        return None, None, None
+    problem = None
+    if getattr(tex, "projection", "FLAT") != "FLAT":
+        problem = "its picture is projected (%s), not laid out with UVs" % tex.projection.title()
+    if getattr(tex.image, "source", "") == "TILED":
+        problem = "its picture uses UDIM tiles - Roblox has one 0-1 square"
+    sock = tex.inputs.get("Vector")
+    uv_name, mat = None, None
+    depth = 0
+    while sock is not None and sock.is_linked and depth < 6:
+        depth += 1
+        node = sock.links[0].from_node
+        out = sock.links[0].from_socket
+        if node.type == "UVMAP":
+            uv_name = node.uv_map or None
+            break
+        if node.type == "TEX_COORD":
+            if out.name != "UV":
+                problem = "its picture uses %s coordinates, not UVs" % out.name
+            break
+        if node.type == "MAPPING":
+            m = _mapping_matrix(node)
+            if m is None:
+                problem = "a Mapping node with inputs plugged in"
+                break
+            mat = m if mat is None else mat @ m
+            sock = node.inputs.get("Vector")
+            continue
+        if node.type == "REROUTE":
+            sock = node.inputs[0]
+            continue
+        problem = "its picture coordinates go through a %s node" % node.bl_label
+        break
+    return uv_name, mat, problem
+
+
+def _mapping_matrix(node):
+    """A Mapping node as a 4x4 matrix (Point / Texture / Vector types), None if it's driven by links."""
+    import mathutils
+    vals = {}
+    for name in ("Location", "Rotation", "Scale"):
+        sk = node.inputs.get(name)
+        if sk is not None and sk.is_linked:
+            return None
+        vals[name] = sk.default_value if sk is not None else None
+    loc = mathutils.Vector(vals["Location"]) if vals["Location"] is not None else mathutils.Vector()
+    rot = mathutils.Euler(vals["Rotation"]).to_matrix().to_4x4()
+    sc = vals["Scale"]
+    smat = mathutils.Matrix.Diagonal((sc[0], sc[1], sc[2], 1.0))
+    t = node.vector_type
+    if t == "POINT":
+        m = mathutils.Matrix.Translation(loc) @ rot @ smat
+    elif t == "TEXTURE":
+        m = (mathutils.Matrix.Translation(loc) @ rot @ smat).inverted_safe()
+    else:                      # VECTOR / NORMAL: no moving
+        m = rot @ smat
+    return np.array(m, dtype=np.float64)
+
+
 def _overlay_colour(base):
     """sRGB colour if Base Color is Mix(colour, picture, factor = picture alpha), else None."""
     if base is None or not base.is_linked:
@@ -629,6 +716,7 @@ def get_material(obj, mat=False):
     img = _image_upstream(base)
     if img is not None:
         out["maps"]["color"] = img
+        out["uv"], out["uv_mapping"], out["uv_problem"] = _texture_uv(_tex_node_upstream(base))
         over = _overlay_colour(base)
         if over is not None:
             # picture over a plain colour through its see-through spots (a Roblox Overlay /
@@ -708,7 +796,10 @@ def send_object(obj, props, depsgraph):
 def _send_piece(obj, props, depsgraph, key, name, mat_index, look):
     if look is None:
         look = get_material(obj) if props.send_texture else {"maps": {}, "alpha": False, "tint": None, "double": True}
-    data, info = build_mesh(obj, depsgraph, props, normal_map="normal" in look["maps"], mat_index=mat_index)
+    uv_spec = {"name": look.get("uv"), "mapping": look.get("uv_mapping")}
+    data, info = build_mesh(obj, depsgraph, props, normal_map="normal" in look["maps"], mat_index=mat_index, uv_spec=uv_spec)
+    if look.get("uv_problem"):
+        info["uv_problem"] = look["uv_problem"]
 
     # pictures: each one is only sent if Mesh Downloader doesn't have it yet
     maps, blobs = [], {}
@@ -784,6 +875,8 @@ def _send_many(objs, props, depsgraph):
             extra = ", %d bones" % len(info["bones"]) if info.get("bones") else ""
             if info.get("pieces"):
                 extra += ", %d parts (one per material)" % info["pieces"]
+            if info.get("uv_problem"):
+                notes.append("%s: %s - it may look different in Studio" % (obj.name, info["uv_problem"]))
             sent.append("%s (%d tris%s)" % (obj.name, info["tris"], extra))
             if info.get("over4"):
                 notes.append("%s: %d vertices had more than 4 bones - kept the strongest 4" % (obj.name, info["over4"]))
