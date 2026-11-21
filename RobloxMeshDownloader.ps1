@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.9'
+$AppVersion = '7.0'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -1677,6 +1677,7 @@ function Resolve-ToBlender($p, [bool]$noWait = $false) {
         # a plain part: Blender builds the shape itself
         $ev = @{ key = [string]$p.key; name = (Clean-Field ([string]$p.name)); shape = [string]$p.shape
                  look = 'opaque'; transparency = [double]$p.transparency }
+        if ([string]$p.rig -match '^[0-9a-f]{6,40}$') { $ev.rig = [string]$p.rig; $ev.bone = [string]$p.bone }
         foreach ($f in @('color', 'cframe', 'size')) { if ($p.$f) { $ev[$f] = [double[]]@($p.$f) } }
         return $ev
     }
@@ -1698,6 +1699,7 @@ function Resolve-ToBlender($p, [bool]$noWait = $false) {
     foreach ($f in @('color', 'cframe', 'size', 'scale')) {
         if ($p.$f) { $ev[$f] = [double[]]@($p.$f) }
     }
+    if ([string]$p.rig -match '^[0-9a-f]{6,40}$') { $ev.rig = [string]$p.rig; $ev.bone = [string]$p.bone }
     return $ev
 }
 function Queue-ToBlender($ev) {

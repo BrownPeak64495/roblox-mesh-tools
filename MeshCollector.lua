@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.9" -- keep in sync with version.json
+local PLUGIN_VERSION = "7.0" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -6302,6 +6302,8 @@ end)
 		local meshUri, tex, look, cf = "", "", "opaque", p.CFrame
 		local ev = {
 			key = p:GetAttribute("BlenderKey"),
+			rig = p:GetAttribute("BlenderRigKey"),
+			bone = p:GetAttribute("BlenderRigBone"),
 			name = p.Name,
 			color = { p.Color.R, p.Color.G, p.Color.B },
 			transparency = p.Transparency,
@@ -6440,58 +6442,8 @@ end)
 		end
 	end
 
-	local function sendSelection()
-		local parts, seen = {}, {}
-		local function consider(inst)
-			if inst:IsA("SpecialMesh") or inst:IsA("FileMesh") then
-				inst = inst.Parent
-			end
-			if inst and inst:IsA("BasePart") and not seen[inst] and describe(inst) then
-				seen[inst] = true
-				table.insert(parts, inst)
-			end
-		end
-		for _, s in ipairs(Selection:Get()) do
-			consider(s)
-			for _, d in ipairs(s:GetDescendants()) do
-				consider(d)
-			end
-		end
-		if #parts == 0 then
-			warn("[Mesh Tools] Send to Blender: select MeshParts (or parts with a SpecialMesh) first.")
-			return
-		end
-		local finish = beginRecording("Send to Blender")
-		local list = {}
-		for _, p in ipairs(parts) do
-			local key = p:GetAttribute("BlenderKey")
-			if type(key) ~= "string" or not string.match(key, "^%x+$") or #key < 6 then
-				p:SetAttribute("BlenderKey", string.lower((string.gsub(HttpService:GenerateGUID(false), "%W", ""))))
-			end
-			p:SetAttribute("BlenderLinked", true)
-			local ev = describe(p)
-			lastSent[p] = HttpService:JSONEncode(ev)
-			table.insert(list, ev)
-			link(p)
-		end
-		finish(true)
-		local d = post(list, false)
-		if not d then
-			warn("[Mesh Tools] Send to Blender: open Mesh Downloader first.")
-		elseif (d.ready or 0) + (d.waiting or 0) == 0 then
-			warn("[Mesh Tools] Send to Blender: none of these meshes have a Roblox ID Mesh Downloader can get.")
-		else
-			local msg = string.format("[Mesh Tools] Sent %d part(s) to Blender", (d.ready or 0) + (d.waiting or 0))
-			if (d.waiting or 0) > 0 then
-				msg = msg .. string.format(" - %d downloading first%s", d.waiting, d.hasKey and "" or " (needs your API key in Mesh Downloader)")
-			end
-			print(msg .. ". Turn on 'Receive from Studio' in Blender's Roblox panel if nothing shows up.")
-		end
-	end
-
-	-- "Send Rig to Blender": only the skeleton (Motor6D joints + Bones) of the selected
-	-- model, as a Blender armature. Works when the meshes are gone - in Blender, put the
-	-- shapes back with "Attach meshes to rig".
+	-- The skeleton of a rig (Motor6D joints + Bones). Sent along with its parts, so in Blender
+	-- every part is attached to one armature and moves with its bones.
 	local function rigOf(model)
 		-- Motor6D joints become bones. Parts glued on with welds (clothing layers, accessories,
 		-- parts in models inside the rig) follow the bone of the part they're glued to.
@@ -6599,42 +6551,119 @@ end)
 				boneIndex[d] = names[d.Name]
 			end
 		end
-		return bones, partList
+		local boneOfPart = {}
+		for pt, bi in pairs(partBone) do
+			boneOfPart[pt] = bones[bi + 1] and bones[bi + 1].n
+		end
+		for _, pt in ipairs(parts) do
+			boneOfPart[pt] = boneOfPart[pt] or bones[1].n
+		end
+		return bones, partList, boneOfPart
 	end
 
-	local rigButton = toolbar:CreateButton("Send Rig to Blender", "Send only the skeleton (joints + Bones) of the selected model to Blender - works even when its meshes are missing", "")
-	rigButton.ClickableWhenViewportHidden = true
-	rigButton.Click:Connect(function()
-		rigButton:SetActive(false)
-		local ok, err = pcall(function()
-			local list = {}
-			for _, sel in ipairs(Selection:Get()) do
-				local model = sel:IsA("BasePart") and (sel:FindFirstAncestorWhichIsA("Model") or sel) or sel
-				local bones, partList = rigOf(model)
-				if bones and #bones > 0 then
-					local key = model:GetAttribute("BlenderRigKey")
-					if type(key) ~= "string" then
-						key = string.lower((string.gsub(HttpService:GenerateGUID(false), "%W", "")))
-						model:SetAttribute("BlenderRigKey", key)
-					end
-					table.insert(list, { type = "rig", key = key, name = model.Name, bones = bones, parts = partList })
+	local function sendSelection()
+		local parts, seen = {}, {}
+		local function consider(inst)
+			if inst:IsA("SpecialMesh") or inst:IsA("FileMesh") then
+				inst = inst.Parent
+			end
+			if inst and inst:IsA("BasePart") and not seen[inst] and describe(inst) then
+				seen[inst] = true
+				table.insert(parts, inst)
+			end
+		end
+		for _, s in ipairs(Selection:Get()) do
+			consider(s)
+			for _, d in ipairs(s:GetDescendants()) do
+				consider(d)
+			end
+		end
+		if #parts == 0 and not (#Selection:Get() > 0) then
+			warn("[Mesh Tools] Send to Blender: select parts or a model first.")
+			return
+		end
+		-- rigs in the selection (a model with joints or Bones), sent first
+		local list, rigOfPart = {}, {}
+		local rigSeen = {}
+		-- the rigs a selection belongs to: characters (a Humanoid / AnimationController) first,
+		-- otherwise the outermost model with Motor6Ds or Bones
+		local function isCharacter(m)
+			return m:FindFirstChildWhichIsA("Humanoid") or m:FindFirstChildWhichIsA("AnimationController")
+		end
+		local function rigsFor(inst)
+			local m = inst:IsA("Model") and inst or inst:FindFirstAncestorWhichIsA("Model")
+			local best = nil
+			while m and m ~= workspace do
+				if isCharacter(m) then
+					return { m }
+				end
+				if m:FindFirstChildWhichIsA("Motor6D", true) or m:FindFirstChildWhichIsA("Bone", true) then
+					best = m
+				end
+				m = m:FindFirstAncestorWhichIsA("Model")
+			end
+			-- a folder / model holding several characters
+			local found = {}
+			for _, d in ipairs(inst:GetDescendants()) do
+				if (d:IsA("Humanoid") or d:IsA("AnimationController")) and d.Parent and d.Parent:IsA("Model") then
+					table.insert(found, d.Parent)
 				end
 			end
-			if #list == 0 then
-				warn("[Mesh Tools] Send Rig to Blender: select a rig (a model with Motor6Ds or Bones) first.")
-				return
+			if #found > 0 then
+				return found
 			end
-			local d = post(list, false)
-			if not d then
-				warn("[Mesh Tools] Send Rig to Blender: open Mesh Downloader first.")
-			else
-				print(string.format("[Mesh Tools] Sent %d rig(s) to Blender (%d bones).", #list, #list[1].bones))
-			end
-		end)
-		if not ok then
-			warn("[Mesh Tools] Send Rig to Blender: " .. tostring(err))
+			return best and { best } or {}
 		end
-	end)
+		for _, sel in ipairs(Selection:Get()) do
+			for _, model in ipairs(rigsFor(sel)) do
+				if not rigSeen[model] then
+					rigSeen[model] = true
+					local bones, partList, boneOfPart = rigOf(model)
+					if bones and #bones > 0 then
+						local key = model:GetAttribute("BlenderRigKey")
+						if type(key) ~= "string" then
+							key = string.lower((string.gsub(HttpService:GenerateGUID(false), "%W", "")))
+							model:SetAttribute("BlenderRigKey", key)
+						end
+						table.insert(list, { type = "rig", key = key, name = model.Name, bones = bones, parts = partList })
+						for pt, bn in pairs(boneOfPart) do
+							rigOfPart[pt] = { rig = key, bone = bn }
+						end
+					end
+				end
+			end
+		end
+		local finish = beginRecording("Send to Blender")
+		for _, p in ipairs(parts) do
+			local key = p:GetAttribute("BlenderKey")
+			if type(key) ~= "string" or not string.match(key, "^%x+$") or #key < 6 then
+				p:SetAttribute("BlenderKey", string.lower((string.gsub(HttpService:GenerateGUID(false), "%W", ""))))
+			end
+			p:SetAttribute("BlenderLinked", true)
+			local r = rigOfPart[p]
+			if r then
+				p:SetAttribute("BlenderRigKey", r.rig) -- in Blender it's attached to this rig's bone
+				p:SetAttribute("BlenderRigBone", r.bone)
+			end
+			local ev = describe(p)
+			lastSent[p] = HttpService:JSONEncode(ev)
+			table.insert(list, ev)
+			link(p)
+		end
+		finish(true)
+		local d = post(list, false)
+		if not d then
+			warn("[Mesh Tools] Send to Blender: open Mesh Downloader first.")
+		elseif (d.ready or 0) + (d.waiting or 0) == 0 then
+			warn("[Mesh Tools] Send to Blender: nothing here Blender can get (no meshes with a Roblox ID, no rig).")
+		else
+			local msg = string.format("[Mesh Tools] Sent %d part(s) to Blender", (d.ready or 0) + (d.waiting or 0))
+			if (d.waiting or 0) > 0 then
+				msg = msg .. string.format(" - %d downloading first%s", d.waiting, d.hasKey and "" or " (needs your API key in Mesh Downloader)")
+			end
+			print(msg .. ". Turn on 'Receive from Studio' in Blender's Roblox panel if nothing shows up.")
+		end
+	end
 
 	local sendButton = toolbar:CreateButton("Send to Blender", "Send the selected mesh parts to Blender - they stay linked both ways", "")
 	sendButton.ClickableWhenViewportHidden = true

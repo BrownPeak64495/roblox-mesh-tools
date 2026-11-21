@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 9, 0),
+    "version": (1, 10, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -1114,7 +1114,10 @@ def make_material(name, image, look, color, transparency):
 
 
 def _move_target(obj):
-    """What to move when the part moves: the armature for rigged meshes, else the object."""
+    """What to move when the part moves: the armature for rigged meshes, else the object
+    (a part of a whole rig from Studio moves on its own)."""
+    if obj.get("roblox_rig_part"):
+        return obj
     return obj.parent if (obj.parent is not None and obj.parent.type == "ARMATURE") else obj
 
 
@@ -1185,8 +1188,28 @@ def _cframe_matrix(cf, props):
     return mathutils.Matrix((k @ _rbx_matrix(cf) @ np.linalg.inv(kl)).tolist())
 
 
-def build_object(name, mesh, props, scale=(1, 1, 1), image=None, look="opaque", color=None, transparency=0.0, matrix=None):
-    """Makes a Blender object (and an armature when the mesh has bones) from a read .mesh."""
+def _attach_to_rig(obj, rig, bone, mesh):
+    """A part of a rig from Studio: moves with the rig's bones. Skinned meshes keep their weights
+    (by bone name); other parts follow the one bone their part hangs on."""
+    groups_made = any(len(g.name) for g in obj.vertex_groups)
+    if not groups_made:
+        b = bone if (bone and bone in rig.data.bones) else (rig.data.bones[0].name if rig.data.bones else None)
+        if b is None:
+            return
+        g = obj.vertex_groups.new(name=b)
+        g.add(list(range(len(obj.data.vertices))), 1.0, "REPLACE")
+    mod = obj.modifiers.new("Armature", "ARMATURE")
+    mod.object = rig
+    mw = obj.matrix_world.copy()
+    obj.parent = rig
+    obj.matrix_world = mw
+    obj["roblox_rig_part"] = True
+
+
+def build_object(name, mesh, props, scale=(1, 1, 1), image=None, look="opaque", color=None, transparency=0.0, matrix=None,
+                 rig=None, bone=None):
+    """Makes a Blender object from a read .mesh: with its own armature when the mesh has bones,
+    or attached to a rig from Studio (rig=armature object)."""
     ax = _axis_matrix(props)
     s = props.studs_per_meter
     sc = np.array(scale, dtype=np.float64)
@@ -1224,7 +1247,19 @@ def build_object(name, mesh, props, scale=(1, 1, 1), image=None, look="opaque", 
     if look or image is not None or color is not None:
         me.materials.append(make_material(name, image, look, color, transparency))
 
-    if mesh["bones"]:
+    if rig is not None:
+        if mesh["bones"] and mesh["skin_idx"] is not None:
+            groups = [obj.vertex_groups.new(name=b["n"] or ("Bone%d" % i)) for i, b in enumerate(mesh["bones"])]
+            for v in range(len(pos)):
+                for k in range(4):
+                    w = float(mesh["skin_w"][v, k])
+                    if w > 0:
+                        groups[int(mesh["skin_idx"][v, k])].add([v], w, "ADD")
+            for g in list(obj.vertex_groups):        # bones the rig doesn't have would do nothing
+                if g.name not in rig.data.bones:
+                    obj.vertex_groups.remove(g)
+        _attach_to_rig(obj, rig, bone, mesh)
+    elif mesh["bones"]:
         arm_data = bpy.data.armatures.new(name + "_Rig")
         rig = bpy.data.objects.new(name + "_Rig", arm_data)
         bpy.context.scene.collection.objects.link(rig)
@@ -1239,10 +1274,10 @@ def build_object(name, mesh, props, scale=(1, 1, 1), image=None, look="opaque", 
             eb = arm_data.edit_bones.new(b["n"] or ("Bone%d" % i))
             eb.head = heads[i].tolist()
             kids = [j for j, c in enumerate(mesh["bones"]) if c["p"] == i and np.linalg.norm(heads[j] - heads[i]) > 1e-4]
-            if kids:
-                tail = heads[kids[0]]
+            if len(kids) == 1:
+                tail = heads[kids[0]]                 # a chain: point at the next joint
             else:
-                tail = heads[i] + np.array([0, 0, size * 0.05])
+                tail = heads[i] + np.array([0, 0, size * 0.05])   # a branch: short, so it doesn't look joined to one child
             if np.linalg.norm(tail - heads[i]) < 1e-4:
                 tail = heads[i] + np.array([0, 0, size * 0.05])
             eb.tail = tail.tolist()
@@ -1468,7 +1503,7 @@ def build_rig(ev, props):
     bpy.ops.object.mode_set(mode="OBJECT")
     rig.show_in_front = True
     bpy.context.view_layer.objects.active = prev if prev is not None else rig
-    _state["status"] = "From Studio: rig %s (%d bones) - select its meshes + the rig > Attach meshes to rig" % (name, len(bones))
+    _state["status"] = "From Studio: rig %s (%d bones)" % (name, len(bones))
     return rig
 
 
@@ -1506,7 +1541,7 @@ def apply_studio_event(ev, props):
     same_look = obj is not None and obj.get("roblox_look_key") == "%s|%s|%.3f" % (tex_name, look, transparency)
     if same_mesh:
         # only moved / recoloured: no need to rebuild
-        target = obj.parent if (obj.parent is not None and obj.parent.type == "ARMATURE") else obj
+        target = _move_target(obj)
         if matrix is not None:
             target.matrix_world = matrix
         if not same_look:
@@ -1544,8 +1579,11 @@ def apply_studio_event(ev, props):
         name = obj.name
         _remove_object(obj)
     img = _studio_image(props, tex_name)
-    new = build_object(name, mesh, props, scale, img, look, color, transparency, matrix)
-    if new.parent is not None and matrix is not None:
+    rig = None
+    if ev.get("rig"):
+        rig = next((o for o in bpy.data.objects if o.type == "ARMATURE" and o.get("roblox_rig_from_studio") == ev["rig"]), None)
+    new = build_object(name, mesh, props, scale, img, look, color, transparency, matrix, rig=rig, bone=ev.get("bone"))
+    if rig is None and new.parent is not None and matrix is not None:
         new.parent.matrix_world = matrix
         new.matrix_world = matrix
     new[KEY_PROP] = key

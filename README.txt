@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v6.9
+ROBLOX MESH TOOLS v7.0
 ======================
 
 What's in here
@@ -252,13 +252,18 @@ STUDIO -> BLENDER (and keeping both in sync)
   Meshes that aren't downloaded yet are downloaded first (needs your API
   key). Blender can also open .mesh files directly: File > Import >
   Roblox Mesh (.mesh) - any version, Draco-compressed ones too.
+  RIGS: select a character (or any part of it) > Send to Blender. One
+  armature comes with it (a bone per Motor6D joint, plus its Bones) and
+  every part is attached to it: skinned meshes keep their weights, other
+  parts follow the bone of the part they hang on (clothing and accessories
+  follow the part they're welded to). Pose the armature and it all moves.
   Plain parts (blocks, balls, cylinders, wedges, the default head) go to
   Blender as their shapes. Things from far from Studio's centre arrive at
   Blender's centre (Options > "Centre things from Studio") and go back to the
   right place.
   RIG WITHOUT ITS MESHES (e.g. an .rbxm whose meshes are gone) + the shapes
   from somewhere else (an .obj):
-    1. Studio: insert the .rbxm, select the model > toolbar "Send Rig to
+    1. Studio: insert the .rbxm, select the model > toolbar "Send to
        Blender". Blender gets an armature: one bone per part (from its
        Motor6D joints) plus any Bones.
     2. Blender: File > Import > Wavefront (.obj).
