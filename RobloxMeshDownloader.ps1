@@ -5,7 +5,7 @@
 #  IDs straight to it (no copy-paste needed).
 # ==========================================================
 
-$AppVersion = '6.4'
+$AppVersion = '6.5'
 $DefaultUpdateUrl = 'https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main'
 $Port = 47820
 
@@ -2008,6 +2008,47 @@ function Handle-Request($ctx) {
             Log ("Saved model {0} ({1})" -f $rel, (Format-Size $mb.Length))
             Send-Json $ctx @{ ok = $true; done = $true; path = $rel; full = $file }
             if ($TglOpen.IsChecked) { Start-Process explorer.exe "/select,`"$file`"" }
+            return
+        }
+        if ($path -eq '/delete' -and $ctx.Request.HttpMethod -eq 'POST') {
+            # Inserter > Delete: library files go to the Recycle Bin, Studio's copies are removed
+            $sr = New-Object IO.StreamReader($ctx.Request.InputStream, [Text.Encoding]::UTF8)
+            $d = $sr.ReadToEnd() | ConvertFrom-Json; $sr.Close()
+            Add-Type -AssemblyName Microsoft.VisualBasic
+            $recycle = {
+                param([string]$f)
+                if ($f -and (Test-Path -LiteralPath $f)) {
+                    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($f, 'OnlyErrorDialogs', 'SendToRecycleBin')
+                }
+            }
+            try {
+                if ([string]$d.mesh -match '^\d{5,}$') {
+                    $id = [string]$d.mesh
+                    $e = $script:index[$id]
+                    $root = Get-SaveRoot
+                    if ($e -and $e.file -and $root) {
+                        $saved = [IO.Path]::GetFullPath((Join-Path $root ([string]$e.file)))
+                        if ($saved.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { & $recycle $saved }
+                    }
+                    & $recycle (Join-Path $LibDir "$id.mesh")
+                    & $recycle (Join-Path $LookDir "$id.rbxm")
+                    if ($script:studioDirs.Count -eq 0) { $script:studioDirs = @(Get-StudioContentDirs) }
+                    foreach ($sd in $script:studioDirs) {
+                        try { Remove-Item -LiteralPath (Join-Path $sd "meshtools\$id.mesh") -Force -ErrorAction Stop } catch { }
+                    }
+                    $nm = if ($e) { [string]$e.name } else { $id }
+                    $script:index.Remove($id); Save-Index
+                    $script:boundsCache.Remove($id); $script:bonesCache.Remove($id)
+                    Log ("Deleted mesh '{0}' ({1}) - it's in the Recycle Bin." -f $nm, $id)
+                    Send-Json $ctx @{ ok = $true }
+                } elseif ($d.model) {
+                    $full = Resolve-SafeModelPath ([string]$d.model)
+                    if (-not $full) { Send-Json $ctx @{ ok = $false; error = 'model file not found' } 404; return }
+                    & $recycle $full
+                    Log ("Deleted model '{0}' - it's in the Recycle Bin." -f [IO.Path]::GetFileName($full))
+                    Send-Json $ctx @{ ok = $true }
+                } else { Send-Json $ctx @{ ok = $false; error = 'bad request' } 400 }
+            } catch { Send-Json $ctx @{ ok = $false; error = $_.Exception.Message } 500 }
             return
         }
         if ($path -eq '/reveal') {

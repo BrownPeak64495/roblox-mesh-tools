@@ -28,7 +28,7 @@ pcall(function()
 	SerializationService = game:GetService("SerializationService")
 end)
 
-local PLUGIN_VERSION = "6.4" -- keep in sync with version.json
+local PLUGIN_VERSION = "6.5" -- keep in sync with version.json
 local VERSION_URL = "https://raw.githubusercontent.com/BrownPeak64495/roblox-mesh-tools/main/version.json"
 local PORT = 47820
 local BASE = "http://localhost:" .. PORT
@@ -66,6 +66,7 @@ local DEFAULTS = {
 	blenderKeepMoves = true, -- keep where you moved / how you resized a part in Studio when Blender resends it
 	blenderBones = true, -- build Bones and follow poses for meshes sent with an armature
 	blenderSync = true, -- parts sent with "Send to Blender" keep Blender up to date as you change them
+	showObjImport = false, -- "Import .obj" in the Inserter (Blender does all of it and more)
 	blenderShareBones = true, -- meshes on one Blender armature share one set of Bones (one skeleton)
 	-- appearance
 	uiScale = 100, -- percent
@@ -3569,7 +3570,7 @@ local searchHolder, searchBox = textInput("Search meshes and models...", 1)
 local refreshLibButton = button("Refresh", "secondary")
 local importObjButton = button("Import .obj", "secondary")
 local searchRow = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, LayoutOrder = 1 }, { hlist(6) })
-searchHolder.Size = UDim2.new(1, -184, 1, 0)
+searchHolder.Size = UDim2.new(1, S.showObjImport and -184 or -86, 1, 0)
 searchHolder.LayoutOrder = 1
 searchHolder.Parent = searchRow
 refreshLibButton.Size = UDim2.new(0, 80, 1, 0)
@@ -3577,6 +3578,7 @@ refreshLibButton.LayoutOrder = 2
 refreshLibButton.Parent = searchRow
 importObjButton.Size = UDim2.new(0, 92, 1, 0)
 importObjButton.LayoutOrder = 3
+importObjButton.Visible = S.showObjImport and true or false
 importObjButton.Parent = searchRow
 searchRow.Parent = insPage
 
@@ -3623,7 +3625,8 @@ infoLabel.Parent = infoCard
 
 local insertButton = button("Insert", "primary")
 local revealButton = button("Show in folder", "secondary")
-buttonRow(2, { insertButton, revealButton }).Parent = infoBlock
+local deleteButton = button("Delete", "secondary")
+buttonRow(2, { insertButton, revealButton, deleteButton }).Parent = infoBlock
 local insStatus = dimText("", 3, 11)
 insStatus.Parent = infoBlock
 
@@ -4580,6 +4583,8 @@ renderInserter = function()
 end
 
 refreshInserter = function()
+	importObjButton.Visible = S.showObjImport and true or false
+	searchHolder.Size = UDim2.new(1, S.showObjImport and -184 or -86, 1, 0)
 	task.spawn(function()
 		setInsStatus("Loading library...", nil)
 		local ok, res = request("GET", "/library")
@@ -4732,6 +4737,47 @@ revealButton.MouseButton1Click:Connect(function()
 		setInsStatus("Couldn't open the folder - is Mesh Downloader open?", RED)
 	end
 end)
+
+-- Delete: click twice (the first click asks). Files go to the Recycle Bin.
+do
+	local armed, armedFor = false, nil
+	deleteButton.MouseButton1Click:Connect(function()
+		if not selected or (selected.kind ~= "mesh" and selected.kind ~= "model") then
+			setInsStatus("Pick a mesh or model first (click its card).", RED)
+			return
+		end
+		local target = selected
+		if not armed or armedFor ~= target.item then
+			armed, armedFor = true, target.item
+			deleteButton.Text = "Sure? Click again"
+			setInsStatus(target.kind == "mesh"
+				and "Deletes this mesh from your library and from Studio (to the Recycle Bin). Parts that use it go blank after Studio restarts."
+				or "Deletes this model file (to the Recycle Bin).", RED)
+			task.delay(4, function()
+				if armedFor == target.item then
+					armed, armedFor = false, nil
+					deleteButton.Text = "Delete"
+				end
+			end)
+			return
+		end
+		armed, armedFor = false, nil
+		deleteButton.Text = "Delete"
+		local body = target.kind == "mesh" and { mesh = target.item.id } or { model = target.item.key }
+		local ok, res = request("POST", "/delete", HttpService:JSONEncode(body))
+		local d = ok and decodeBody(res)
+		if d and d.ok then
+			selected = nil
+			setInfo("Click a card's name to see its details here.")
+			refreshInserter()
+			task.delay(0.6, function()
+				setInsStatus("Deleted " .. tostring(target.item.name or target.item.id) .. " (it's in the Recycle Bin).", GREEN)
+			end)
+		else
+			setInsStatus("Couldn't delete it - " .. tostring(d and d.error or "is Mesh Downloader open?"), RED)
+		end
+	end)
+end
 
 -- Drag a card into the 3D view ------------------------------------------------
 -- The card lifts out and follows the mouse; once the mouse leaves the window it
@@ -5461,6 +5507,11 @@ local function buildSettingsPage(ctx)
 	add(dimText("Separate parts (each with its own texture) bend with the same Bones, so the joints between them stay closed. The Bones go in one part and the parts are grouped in a model named after the armature. Off = every part gets its own copy.", nx(), 10))
 	add(dimText("Off = every resend snaps the part back to where it is in Blender.", nx(), 10))
 	add(toggle("Keep parts I send to Blender in sync", "blenderSync", nx()))
+	add(toggle("Show the Import .obj button (Inserter)", "showObjImport", nx(), function()
+		if refreshInserter then
+			refreshInserter()
+		end
+	end))
 	add(dimText("Select parts and click Send to Blender (toolbar). Moving, resizing or recolouring them here updates Blender, and editing them in Blender updates them here.", nx(), 10))
 
 	add(sectionTitle("Collector", nx()))

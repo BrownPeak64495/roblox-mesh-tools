@@ -1,4 +1,4 @@
-ROBLOX MESH TOOLS v6.4
+ROBLOX MESH TOOLS v6.5
 ======================
 
 What's in here
@@ -245,9 +245,15 @@ STUDIO -> BLENDER (and keeping both in sync)
   Once you've changed a part in Blender, Studio's undo won't rebuild it in
   Blender from the older mesh - send it again from Blender instead.
 
+DELETE (Mesh Inserter): pick a card > Delete > click again to confirm.
+The files go to the Recycle Bin (restore them from there if you change your
+mind - Mesh Downloader puts them back into Studio when it next syncs).
+
 --------------------------------------------------
 IMPORT .OBJ (in the Studio plugin)
 --------------------------------------------------
+Hidden by default (the Blender add-on does all of this and more). Turn it on
+in Settings > Blender > "Show the Import .obj button (Inserter)".
 Mesh Inserter > "Import .obj" (next to Refresh):
   1. Pick one or more .obj files. Pick the .mtl and the texture picture
      (.png / .jpg) at the same time if you have them (Ctrl+click).
