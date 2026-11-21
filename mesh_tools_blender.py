@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Roblox Mesh Tools - Send to Studio",
     "author": "BrownPeak64495",
-    "version": (1, 13, 0),
+    "version": (1, 14, 0),
     "blender": (3, 0, 0),
     "location": "3D View > Sidebar (N) > Roblox",
     "description": "Sends meshes (with bones) straight into Roblox Studio as local .mesh files (no upload) through Mesh Downloader",
@@ -596,6 +596,80 @@ def _mapping_matrix(node):
     return np.array(m, dtype=np.float64)
 
 
+def _constant_colour(sock, depth=0):
+    """Linear RGB of a colour input that isn't a picture (plain colour, Gamma, RGB node), else None."""
+    if sock is None or depth > 6:
+        return None
+    if not sock.is_linked:
+        v = sock.default_value
+        return [float(v[0]), float(v[1]), float(v[2])] if hasattr(v, "__len__") else [float(v)] * 3
+    node = sock.links[0].from_node
+    if node.type == "GAMMA":
+        c = _constant_colour(node.inputs.get("Color"), depth + 1)
+        g = node.inputs.get("Gamma")
+        if c is None or g is None or g.is_linked:
+            return None
+        return [max(x, 0.0) ** float(g.default_value) for x in c]
+    if node.type == "RGB":
+        v = node.outputs[0].default_value
+        return [float(v[0]), float(v[1]), float(v[2])]
+    if node.type == "REROUTE":
+        return _constant_colour(node.inputs[0], depth + 1)
+    return None
+
+
+def _image_rgba(img):
+    w, h = img.size
+    px = np.empty(w * h * img.channels, dtype=np.float32)
+    img.pixels.foreach_get(px)
+    px = px.reshape(h, w, img.channels)
+    if img.channels == 3:
+        px = np.concatenate([px, np.ones((h, w, 1), dtype=np.float32)], axis=2)
+    elif img.channels < 3:
+        g = px[:, :, :1]
+        a = px[:, :, 1:2] if img.channels == 2 else np.ones((h, w, 1), dtype=np.float32)
+        px = np.concatenate([g, g, g, a], axis=2)
+    return px
+
+
+def _alpha_picture(mat, base, base_img, alpha_sock, atex):
+    """One picture for Roblox: RGB from Base Color (picture or plain colour), A from the picture in Alpha."""
+    src = atex.image
+    if src.size[0] == 0 or not (src.has_data or src.filepath or src.packed_file):
+        return None
+    a_px = _image_rgba(src)
+    h, w = a_px.shape[:2]
+    out_sock = alpha_sock.links[0].from_socket if alpha_sock.links[0].from_node == atex else None
+    if out_sock is not None and out_sock.name == "Color":
+        # a colour plugged into a number: Blender uses its brightness
+        rgb = a_px[:, :, :3]
+        lin = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4) if not src.is_float else rgb
+        a = lin[:, :, 0] * 0.2126 + lin[:, :, 1] * 0.7152 + lin[:, :, 2] * 0.0722
+    else:
+        a = a_px[:, :, 3]
+    if base_img is not None and base_img.size[0] > 0:
+        c_px = _image_rgba(base_img)
+        ys = (np.arange(h) * c_px.shape[0] // h)
+        xs = (np.arange(w) * c_px.shape[1] // w)
+        rgb = c_px[ys][:, xs, :3]
+    else:
+        c = _constant_colour(base)
+        if c is None:
+            c = [1.0, 1.0, 1.0]
+        rgb = np.empty((h, w, 3), dtype=np.float32)
+        rgb[:, :] = [_to_srgb(x) for x in c]          # pictures hold sRGB
+    pix = np.concatenate([rgb, a[:, :, None]], axis=2).astype(np.float32)
+    name = "Roblox alpha %s" % mat.name
+    made = bpy.data.images.get(name)
+    if made is None or tuple(made.size) != (w, h):
+        if made is not None:
+            bpy.data.images.remove(made)
+        made = bpy.data.images.new(name, w, h, alpha=True)
+    made.pixels.foreach_set(pix.ravel())
+    made.update()
+    return made
+
+
 def _overlay_colour(base):
     """sRGB colour if Base Color is Mix(colour, picture, factor = picture alpha), else None."""
     if base is None or not base.is_linked:
@@ -728,6 +802,16 @@ def get_material(obj, mat=False):
     alpha = bsdf.inputs.get("Alpha")
     if alpha is not None and (alpha.is_linked or alpha.default_value < 0.999):
         out["alpha"] = True
+    atex = _tex_node_upstream(alpha) if (alpha is not None and alpha.is_linked) else None
+    if atex is not None and atex.image is not None and (img is None or img != atex.image):
+        # the see-through comes from a picture in Alpha (like a gradient over a base colour):
+        # Roblox takes one picture, so make one - colour from Base Color, see-through from Alpha
+        made = _alpha_picture(mat, base, img, alpha, atex)
+        if made is not None:
+            out["maps"]["color"] = made
+            out["tint"] = None
+            out["look"] = None
+            out["uv"], out["uv_mapping"], out["uv_problem"] = _texture_uv(atex)
     nrm = bsdf.inputs.get("Normal")
     if nrm is not None and nrm.is_linked:
         node = nrm.links[0].from_node
@@ -790,6 +874,8 @@ def send_object(obj, props, depsgraph):
     if skinned:
         _state["sent"][key] = dict(skinned[0][1], pieces=skinned)
     total["pieces"] = len(sent)
+    withtex = sum(1 for _, inf in sent if str(inf.get("texture") or "").startswith("texture "))
+    total["texture"] = "%d of them with a texture" % withtex
     return total
 
 
